@@ -2,7 +2,7 @@
 // Multi-step Arrange move gen + fast alpha–beta search + Harmony Bonus generators.
 
 import { performance } from "perf_hooks";
-import { coordsOf, indexOf, NEIGHBORS4_1, NEIGHBORS8_1 } from "./coords";
+import { coordsOf, NEIGHBORS4_1, NEIGHBORS8_1 } from "./coords";
 import { Board, unpackPiece, TypeId, Owner } from "./board";
 import { getPieceDescriptor, planWheelRotate, planBoatOnFlower, planBoatOnAccent } from "./rules";
 import { validateArrange } from "./move";
@@ -246,7 +246,16 @@ function searchAlphaBeta(
     return { score: evaluate(board, side) };
   }
 
+  // Generate & order
   const moves = orderMoves(board, side, generateAllMoves(board, side), ply);
+
+  // Try TT's best move first if present
+  if (tt?.best) {
+    const k = JSON.stringify(tt.best);
+    const i = moves.findIndex(m => JSON.stringify(m) === k);
+    if (i > 0) { const [mv] = moves.splice(i, 1); moves.unshift(mv); }
+  }
+
   if (moves.length === 0) {
     return { score: evaluate(board, side) };
   }
@@ -260,7 +269,13 @@ function searchAlphaBeta(
     try { child = applyMoveCloned(board, side, mv); }
     catch { continue; }
 
-    const res = searchAlphaBeta(child, other(side), depth - 1, -beta, -localAlpha, startMs, opts, ply + 1);
+    // Late Move Reductions: reduce depth for unpromising late moves
+    let newDepth = depth - 1;
+    const idxInList = moves.indexOf(mv);
+    const isQuiet = (mv.kind === "arrange"); // wheel/boat are tactical; search full depth
+    if (depth >= 3 && isQuiet && idxInList >= 6) newDepth = Math.max(1, newDepth - 1);
+
+    const res = searchAlphaBeta(child, other(side), newDepth, -beta, -localAlpha, startMs, opts, ply + 1);
     const v = -res.score;
 
     if (v > value) { value = v; best = mv; }
