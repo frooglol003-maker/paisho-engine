@@ -132,3 +132,126 @@ function negamax(board: Board, side: Side, depth: number, alpha: number, beta: n
   }
   return value;
 }
+// ---------------- Harmony Bonus move generation (append-only) ----------------
+
+import {
+  planWheelRotate,
+  planBoatOnFlower,
+  planBoatOnAccent,
+  isGateCoord,
+  getPieceDescriptor,
+} from "./rules";
+import { coordsOf } from "./coords";
+import { TypeId, unpackPiece } from "./board";
+
+// Types for bonus plans (no board mutation here)
+export type IndexMove = { from: number; to: number };
+export type WheelPlan = { center: number; moves: IndexMove[] }; // rotate 8 neighbors
+export type BoatFlowerPlan = { boat: number; from: number; to: number }; // move a flower 1 step
+export type BoatAccentPlan = { boat: number; remove: number[] }; // remove boat + target accent
+
+function owns(board: Board, idx1: number, side: Side): boolean {
+  const p = board.getAtIndex(idx1);
+  if (!p) return false;
+  const d = unpackPiece(p)!;
+  return side === "host" ? d.owner === 0 : d.owner === 1;
+}
+
+function isType(board: Board, idx1: number, t: TypeId): boolean {
+  const p = board.getAtIndex(idx1);
+  if (!p) return false;
+  const d = unpackPiece(p)!;
+  return d.type === t;
+}
+
+function* neighbors8(idx1: number): Iterable<number> {
+  const { x, y } = coordsOf(idx1 - 1);
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      const tx = x + dx, ty = y + dy;
+      const t0 = indexOf(tx, ty);
+      if (t0 !== -1) yield t0 + 1;
+    }
+  }
+}
+
+/**
+ * Generate all valid Wheel rotations for `side`.
+ * NOTE: Real rules only allow bonus after making a harmony; this function just lists what
+ * would be legal *if* a Wheel bonus is available.
+ */
+export function generateWheelBonusMoves(board: Board, side: Side): WheelPlan[] {
+  const out: WheelPlan[] = [];
+  const N = (board as any).size1Based ?? 249;
+  for (let i = 1; i <= N; i++) {
+    if (!owns(board, i, side)) continue;
+    if (!isType(board, i, TypeId.Wheel)) continue;
+    const plan = planWheelRotate(board, i);
+    if (plan.ok) out.push({ center: i, moves: plan.moves });
+  }
+  return out;
+}
+
+/**
+ * Generate all valid Boat-on-flower bonus moves for `side`.
+ * Moves a BLOOMING flower by 1 (8-neighborhood), cannot land in gates or on occupied squares.
+ */
+export function generateBoatFlowerBonusMoves(board: Board, side: Side): BoatFlowerPlan[] {
+  const out: BoatFlowerPlan[] = [];
+  const N = (board as any).size1Based ?? 249;
+
+  for (let b = 1; b <= N; b++) {
+    if (!owns(board, b, side)) continue;
+    if (!isType(board, b, TypeId.Boat)) continue;
+
+    // A Boat can target a BLOOMING flower (any owner per standard rules for bonus).
+    for (let f = 1; f <= N; f++) {
+      const p = board.getAtIndex(f);
+      if (!p) continue;
+      const d = unpackPiece(p)!;
+      const isFlower =
+        d.type === TypeId.R3 || d.type === TypeId.R4 || d.type === TypeId.R5 ||
+        d.type === TypeId.W3 || d.type === TypeId.W4 || d.type === TypeId.W5 ||
+        d.type === TypeId.Lotus || d.type === TypeId.Orchid;
+      if (!isFlower) continue;
+
+      // Try each adjacent target for that flower
+      for (const to of neighbors8(f)) {
+        const plan = planBoatOnFlower(board, f, to);
+        if (plan.ok) out.push({ boat: b, from: f, to });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Generate all valid Boat-on-accent bonus actions for `side`.
+ * Removes the targeted accent AND the boat itself.
+ */
+export function generateBoatAccentBonusMoves(board: Board, side: Side): BoatAccentPlan[] {
+  const out: BoatAccentPlan[] = [];
+  const N = (board as any).size1Based ?? 249;
+
+  for (let b = 1; b <= N; b++) {
+    if (!owns(board, b, side)) continue;
+    if (!isType(board, b, TypeId.Boat)) continue;
+
+    // Boat can target any adjacent non-boat accent
+    for (const target of neighbors8(b)) {
+      const p = board.getAtIndex(target);
+      if (!p) continue;
+      const d = unpackPiece(p)!;
+      const isAccent = (
+        d.type === TypeId.Rock || d.type === TypeId.Wheel || d.type === TypeId.Boat || d.type === TypeId.Knotweed
+      );
+      if (!isAccent) continue;
+      if (d.type === TypeId.Boat) continue; // planner disallows boating a boat
+
+      const res = planBoatOnAccent(board, target, b);
+      if (res.ok) out.push({ boat: b, remove: res.remove.map(r => r.remove) });
+    }
+  }
+  return out;
+}
