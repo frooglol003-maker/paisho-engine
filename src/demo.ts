@@ -1,25 +1,7 @@
 // src/demo.ts
 import { Board, TypeId, Owner, packPiece } from "./board";
-import * as Engine from "./engine";
+import { pickBestMove } from "./engine";
 import { coordsOf, indexOf } from "./coords";
-
-// Pick whichever best-move function your engine actually exports
-function pickBestMoveFn() {
-  const f =
-    (Engine as any).bestMove ||
-    (Engine as any).findBestMove ||
-    (Engine as any).searchBestMove ||
-    (Engine as any).getBestMove ||
-    (Engine as any).computeBestMove;
-  if (!f) {
-    const exported = Object.keys(Engine).sort().join(", ");
-    throw new Error(
-      `No best-move function found. Exports are: ${exported}. ` +
-      `Expected one of: bestMove, findBestMove, searchBestMove, getBestMove, computeBestMove.`
-    );
-  }
-  return f as (b: Board, pov: "host" | "guest", depth: number) => any;
-}
 
 function idx1(x: number, y: number): number {
   const i0 = indexOf(x, y);
@@ -47,7 +29,9 @@ function printMove(m: any) {
   if (m.kind === "arrange") {
     const fromXY = coordsOf(m.from - 1);
     const toXY = coordsOf(m.path[m.path.length - 1] - 1);
-    console.log(`Engine suggests: ARRANGE from ${JSON.stringify(fromXY)} -> ${JSON.stringify(toXY)} (steps=${m.path.length})`);
+    console.log(
+      `Engine suggests: ARRANGE from ${JSON.stringify(fromXY)} -> ${JSON.stringify(toXY)} (steps=${m.path.length})`
+    );
   } else {
     console.log("Engine suggests:", m);
   }
@@ -56,8 +40,7 @@ function printMove(m: any) {
 async function main() {
   const board = setupSmallPosition();
   const depth = 3; // try 2–4
-  const bestFn = pickBestMoveFn();
-  const move = bestFn(board, "host", depth);
+  const move = pickBestMove(board, "host", depth);
   printMove(move);
 }
 
