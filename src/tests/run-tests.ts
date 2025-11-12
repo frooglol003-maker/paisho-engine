@@ -44,3 +44,14 @@ const b = new Board();
 // Once you have a setup that places starting tiles, it should return a move.
 const mv = pickBestMove(b, "host", 2);
 console.log("Best move for host @ depth 2:", mv);
+import {
+  generateWheelBonusMoves,
+  generateBoatFlowerBonusMoves,
+  generateBoatAccentBonusMoves,
+} from "../engine";
+
+console.log("Test: bonus generators (expect empty arrays on empty board)");
+const b2 = new Board();
+console.log("Wheel bonuses:", generateWheelBonusMoves(b2, "host").length);
+console.log("Boat-on-flower bonuses:", generateBoatFlowerBonusMoves(b2, "host").length);
+console.log("Boat-on-accent bonuses:", generateBoatAccentBonusMoves(b2, "host").length);
