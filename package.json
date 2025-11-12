@@ -9,6 +9,7 @@
     "test": "node ./dist/tests/run-tests.js || node ./tests/run-tests.js"
   },
   "devDependencies": {
+    "ts-node": "^10.9.2",
     "typescript": "^5.0.0"
   },
   "license": "MIT"
