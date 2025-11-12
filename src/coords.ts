@@ -90,3 +90,19 @@ export function indexOf(x: number, y: number): number {
 export function* allIndices(): Iterable<number> {
   for (let i = 0; i < NUM_SQUARES; i++) yield i;
 }
+// --- Compatibility shims for older code ---
+// Type alias
+export type Pt = XY;
+
+// Same value, older name
+export const totalIntersections = NUM_SQUARES;
+
+// Older name for toXY
+export function coordsOf(index: number): XY {
+  return toXY(index);
+}
+
+// Older helper: list of all valid (x,y) points in board order
+export function generateValidPoints(): XY[] {
+  return XY_BY_INDEX.slice(); // shallow copy
+}
