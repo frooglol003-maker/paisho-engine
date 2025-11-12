@@ -1,12 +1,12 @@
 // src/play.ts
 import readline from "readline";
 import { performance } from "perf_hooks";
+
 import { Board, TypeId, Owner, packPiece, unpackPiece } from "./board";
 import { coordsOf, indexOf } from "./coords";
 import { pickBestMove, applyPlannedArrange } from "./engine";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
 import { getGardenType, isGateCoord } from "./rules";
-import { TypeId, Owner, unpackPiece } from "./board";
 
 // ---------- CLI ----------
 const args = Object.fromEntries(
@@ -18,11 +18,12 @@ const args = Object.fromEntries(
 );
 
 type Side = "host" | "guest";
-const HUMAN: Side = (args.human === "guest" ? "guest" : "host");
-const FIRST: Side = (args.first === "guest" ? "guest" : "host");
-const DEPTH = Math.max(1, parseInt(String(args.depth ?? "3"), 10));
-const TIMEMS = args.time ? Math.max(1, parseInt(String(args.time), 10)) : undefined;
+const HUMAN: Side  = (args.human === "guest" ? "guest" : "host");
+const FIRST: Side  = (args.first === "guest" ? "guest" : "host");
+const DEPTH        = Math.max(1, parseInt(String(args.depth ?? "3"), 10));
+const TIMEMS       = args.time ? Math.max(1, parseInt(String(args.time), 10)) : undefined;
 
+// ---------- Sanity check for engine-produced moves ----------
 function isMoveSane(board: Board, mv: any): boolean {
   const N = (board as any).size1Based ?? 249;
   const inRange = (i: any) => Number.isInteger(i) && i >= 1 && i <= N;
@@ -66,40 +67,122 @@ function parsePathList(s: string): number[] {
   });
 }
 
-function boardToAscii(b: Board): string {
-  const lines: string[] = [];
-  const widths = [9,11,13,15, 17,17,17,17,17,17,17,17,17, 15,13,11,9];
-  let base = 1;
-  for (let r = 0; r < widths.length; r++) {
-    const w = widths[r];
-    const pad = " ".repeat((17 - w));
-    const cells: string[] = [];
-    for (let c = 0; c < w; c++) {
-      const idx = base + c;
-      const p = b.getAtIndex(idx);
-      if (!p) { cells.push("·"); continue; }
-      const d = unpackPiece(p)!;
-      const sym =
-        d.type === TypeId.R3 ? "R3" :
-        d.type === TypeId.R4 ? "R4" :
-        d.type === TypeId.R5 ? "R5" :
-        d.type === TypeId.W3 ? "W3" :
-        d.type === TypeId.W4 ? "W4" :
-        d.type === TypeId.W5 ? "W5" :
-        d.type === TypeId.Lotus ? "L " :
-        d.type === TypeId.Orchid ? "O " :
-        d.type === TypeId.Rock ? "⛰ " :
-        d.type === TypeId.Wheel ? "⟳ " :
-        d.type === TypeId.Boat ? "⛵ " :
-        d.type === TypeId.Knotweed ? "✣ " : "??";
-      cells.push(sym.trim());
-    }
-    lines.push(pad + cells.join(" ") + pad);
-    base += w;
-  }
-  return lines.join("\n");
+// ------- ANSI color helpers (no deps) -------
+const ESC   = (s: string) => `\u001b[${s}m`;
+const RESET = ESC("0");
+const BOLD  = ESC("1");
+const DIM   = ESC("2");
+
+// 256-color helpers: 38 for fg, 48 for bg
+const FG = (n: number) => ESC(`38;5;${n}`);
+const BG = (n: number) => ESC(`48;5;${n}`);
+
+// Garden backgrounds (tweak to taste)
+const BG_NEUTRAL = BG(236);   // dark grey
+const BG_RED     = BG(52);    // deep red
+const BG_WHITE   = BG(250);   // light grey
+const BG_GATE    = BG(58);    // olive-ish to mark gates/midlines
+
+// Piece colors
+const FG_HOST  = FG(39);   // blue-ish
+const FG_GUEST = FG(213);  // magenta-ish
+
+function cellBg(x: number, y: number): string {
+  if (x === 0 || y === 0) return BG_GATE; // midlines
+  const g = getGardenType(x, y);
+  if (g === "red") return BG_RED;
+  if (g === "white") return BG_WHITE;
+  return BG_NEUTRAL;
 }
 
+// Compact 2-char symbols (fixed width)
+function symOf(type: TypeId): string {
+  switch (type) {
+    case TypeId.R3: return "R3";
+    case TypeId.R4: return "R4";
+    case TypeId.R5: return "R5";
+    case TypeId.W3: return "W3";
+    case TypeId.W4: return "W4";
+    case TypeId.W5: return "W5";
+    case TypeId.Lotus: return "L ";
+    case TypeId.Orchid: return "O ";
+    case TypeId.Rock: return "⛰ ";
+    case TypeId.Wheel: return "⟳ ";
+    case TypeId.Boat: return "⛵";
+    case TypeId.Knotweed: return "✣ ";
+    default: return "· ";
+  }
+}
+
+function ownerOfPacked(packed: number | null): Owner | null {
+  if (!packed) return null;
+  const d = unpackPiece(packed)!;
+  return d.owner;
+}
+
+// ------- Counting / Pools -------
+type CountMap = Record<string, number>;
+
+const PIECE_KEYS: [TypeId, string][] = [
+  [TypeId.R3, "R3"], [TypeId.R4, "R4"], [TypeId.R5, "R5"],
+  [TypeId.W3, "W3"], [TypeId.W4, "W4"], [TypeId.W5, "W5"],
+  [TypeId.Lotus, "Lotus"], [TypeId.Orchid, "Orchid"],
+  [TypeId.Rock, "Rock"], [TypeId.Wheel, "Wheel"],
+  [TypeId.Boat, "Boat"], [TypeId.Knotweed, "Knotweed"],
+];
+
+// Standard starting pool for BOTH players
+const STANDARD_POOL: CountMap = {
+  R3: 3, R4: 3, R5: 3,
+  W3: 3, W4: 3, W5: 3,
+  Lotus: 1, Orchid: 1,
+  Rock: 1, Wheel: 1, Boat: 1, Knotweed: 1,
+};
+
+const POOL_DEFAULTS: { host: CountMap; guest: CountMap } = {
+  host: { ...STANDARD_POOL },
+  guest: { ...STANDARD_POOL },
+};
+
+function zeroCounts(): CountMap {
+  const out: CountMap = {};
+  for (const [, key] of PIECE_KEYS) out[key] = 0;
+  return out;
+}
+
+function countsOnBoard(board: Board): { host: CountMap; guest: CountMap } {
+  const host = zeroCounts();
+  const guest = zeroCounts();
+  const N = (board as any).size1Based ?? 249;
+  for (let i = 1; i <= N; i++) {
+    const p = board.getAtIndex(i);
+    if (!p) continue;
+    const d = unpackPiece(p)!;
+    const key = PIECE_KEYS.find(([tid]) => tid === d.type)?.[1]!;
+    if (d.owner === Owner.Host) host[key] = (host[key] || 0) + 1;
+    else guest[key] = (guest[key] || 0) + 1;
+  }
+  return { host, guest };
+}
+
+function minusCounts(a: CountMap, b: CountMap): CountMap {
+  const out: CountMap = {};
+  for (const [, key] of PIECE_KEYS) out[key] = (a[key] || 0) - (b[key] || 0);
+  return out;
+}
+
+function countsToLines(label: string, m: CountMap, color: string): string[] {
+  const rows: string[] = [];
+  rows.push(`${BOLD}${color}${label}${RESET}`);
+  for (const [, key] of PIECE_KEYS) {
+    const v = m[key] ?? 0;
+    if (v !== 0) rows.push(`${color}${key.padEnd(8)} ${BOLD}${String(v).padStart(2)}${RESET}`);
+  }
+  if (rows.length === 1) rows.push(`${DIM}(none)${RESET}`);
+  return rows;
+}
+
+// ------- Rendering -------
 function safeXY(idx1: number): string {
   try {
     if (!Number.isInteger(idx1) || idx1 < 1) return "<?>"; // 1-based guard
@@ -108,6 +191,66 @@ function safeXY(idx1: number): string {
   } catch {
     return "<?>"; // fall back if out of board
   }
+}
+
+function boardWithSidebar(board: Board): string {
+  // ring widths for 17 rows
+  const widths = [9,11,13,15, 17,17,17,17,17,17,17,17,17, 15,13,11,9];
+  const lines: string[] = [];
+  let base = 1;
+
+  // Side panel content
+  const onBoard = countsOnBoard(board);
+  const hostOn  = countsToLines("HOST on board", onBoard.host, FG_HOST);
+  const guestOn = countsToLines("GUEST on board", onBoard.guest, FG_GUEST);
+
+  let hostRem: string[] = [];
+  let guestRem: string[] = [];
+  if (POOL_DEFAULTS) {
+    const hostRemaining = minusCounts(POOL_DEFAULTS.host, onBoard.host);
+    const guestRemaining = minusCounts(POOL_DEFAULTS.guest, onBoard.guest);
+    hostRem = countsToLines("HOST remaining", hostRemaining, FG_HOST);
+    guestRem = countsToLines("GUEST remaining", guestRemaining, FG_GUEST);
+  }
+
+  const sidebar: string[] = [];
+  sidebar.push(...hostOn, "", ...guestOn);
+  if (POOL_DEFAULTS) {
+    sidebar.push("", `${DIM}Pools (remaining)${RESET}`, ...hostRem, "", ...guestRem);
+  }
+
+  const sidebarPad = "   ";
+  let sideIdx = 0;
+
+  for (let r = 0; r < widths.length; r++) {
+    const w = widths[r];
+    const padLeft = " ".repeat((17 - w));
+    const cells: string[] = [];
+
+    for (let c = 0; c < w; c++) {
+      const idx = base + c;
+      const p = board.getAtIndex(idx);
+      const { x, y } = coordsOf(idx - 1);
+      const bg = isGateCoord(x, y) ? BG_GATE : cellBg(x, y);
+
+      if (!p) {
+        cells.push(`${bg}${DIM}· ${RESET}`);
+      } else {
+        const d = unpackPiece(p)!;
+        const fg = d.owner === Owner.Host ? FG_HOST : FG_GUEST;
+        const sym = symOf(d.type);
+        cells.push(`${bg}${fg}${BOLD}${sym}${RESET}`);
+      }
+    }
+
+    const boardLine = padLeft + cells.join("") + padLeft;
+    const sideLine  = sidebar[sideIdx] ?? "";
+    lines.push(boardLine + sidebarPad + sideLine);
+    sideIdx++;
+    base += w;
+  }
+
+  return lines.join("\n");
 }
 
 function printMove(m: any) {
@@ -145,207 +288,31 @@ Commands:
   boatf boatX,boatY fromX,fromY -> toX,toY
   boata boatX,boatY targetX,targetY
   engine                       let engine move now
-  place type owner x,y         (optional) manually place a piece
-                               type: R3 R4 R5 W3 W4 W5 Lotus Orchid Rock Wheel Boat Knotweed
-                               owner: host | guest
+  place TYPE OWNER x,y         manually place a piece
+                               TYPE: R3 R4 R5 W3 W4 W5 Lotus Orchid Rock Wheel Boat Knotweed
+                               OWNER: host | guest
   print                        redraw the board
   help                         show this help
   quit
 `);
 }
-// ------- ANSI color helpers (no deps) -------
-const ESC = (s: string) => `\u001b[${s}m`;
-const RESET = ESC("0");
-const BOLD = ESC("1");
-const DIM = ESC("2");
 
-// 256-color helpers: 38 for fg, 48 for bg
-const FG = (n: number) => ESC(`38;5;${n}`);
-const BG = (n: number) => ESC(`48;5;${n}`);
-
-// Garden backgrounds (tweak to taste)
-const BG_NEUTRAL = BG(236);   // dark grey
-const BG_RED     = BG(52);    // deep red
-const BG_WHITE   = BG(250);   // light grey, not pure white to keep contrast
-const BG_GATE    = BG(58);    // olive-ish to mark gates/midlines
-
-// Piece colors
-const FG_HOST  = FG(39);  // blue-ish
-const FG_GUEST = FG(213); // pink/magenta
-
-function cellBg(x: number, y: number): string {
-  if (x === 0 || y === 0) return BG_GATE; // midlines
-  const g = getGardenType(x, y);
-  if (g === "red") return BG_RED;
-  if (g === "white") return BG_WHITE;
-  return BG_NEUTRAL;
-}
-
-// Compact 2-char symbols (kept fixed width)
-function symOf(type: TypeId): string {
-  switch (type) {
-    case TypeId.R3: return "R3";
-    case TypeId.R4: return "R4";
-    case TypeId.R5: return "R5";
-    case TypeId.W3: return "W3";
-    case TypeId.W4: return "W4";
-    case TypeId.W5: return "W5";
-    case TypeId.Lotus: return "L ";
-    case TypeId.Orchid: return "O ";
-    case TypeId.Rock: return "⛰ ";
-    case TypeId.Wheel: return "⟳ ";
-    case TypeId.Boat: return "⛵";
-    case TypeId.Knotweed: return "✣ ";
-    default: return "· ";
-  }
-}
-
-// Determine owner quickly
-function ownerOfPacked(packed: number | null): Owner | null {
-  if (!packed) return null;
-  const d = unpackPiece(packed)!;
-  return d.owner;
-}
-
-// ------- Counting / Pools -------
-type CountMap = Record<string, number>;
-
-const PIECE_KEYS: [TypeId, string][] = [
-  [TypeId.R3, "R3"], [TypeId.R4, "R4"], [TypeId.R5, "R5"],
-  [TypeId.W3, "W3"], [TypeId.W4, "W4"], [TypeId.W5, "W5"],
-  [TypeId.Lotus, "Lotus"], [TypeId.Orchid, "Orchid"],
-  [TypeId.Rock, "Rock"], [TypeId.Wheel, "Wheel"],
-  [TypeId.Boat, "Boat"], [TypeId.Knotweed, "Knotweed"],
-];
-
-// If you want “remaining”, define initial pools here (or set to null to hide).
-// These are just placeholders; edit to your real set when you know it.
-// Standard starting pool for BOTH players:
-// R/W 3–5: 3 each; Lotus: 1; Orchid: 1; Accents: 1 each (Rock, Wheel, Boat, Knotweed)
-const STANDARD_POOL: CountMap = {
-  R3: 3, R4: 3, R5: 3,
-  W3: 3, W4: 3, W5: 3,
-  Lotus: 1, Orchid: 1,
-  Rock: 1, Wheel: 1, Boat: 1, Knotweed: 1,
-};
-
-// Enable “remaining” by providing a pool for each side
-const POOL_DEFAULTS: { host: CountMap; guest: CountMap } = {
-  host: { ...STANDARD_POOL },
-  guest: { ...STANDARD_POOL },
-};
-
-function countsOnBoard(board: Board): { host: CountMap; guest: CountMap } {
-  const host = zeroCounts();
-  const guest = zeroCounts();
-  const N = (board as any).size1Based ?? 249;
-  for (let i = 1; i <= N; i++) {
-    const p = board.getAtIndex(i);
-    if (!p) continue;
-    const d = unpackPiece(p)!;
-    const key = PIECE_KEYS.find(([tid]) => tid === d.type)?.[1]!;
-    if (d.owner === Owner.Host) host[key] = (host[key] || 0) + 1;
-    else guest[key] = (guest[key] || 0) + 1;
-  }
-  return { host, guest };
-}
-
-function minusCounts(a: CountMap, b: CountMap): CountMap {
-  const out: CountMap = {};
-  for (const [, key] of PIECE_KEYS) out[key] = (a[key] || 0) - (b[key] || 0);
-  return out;
-}
-
-function countsToLines(label: string, m: CountMap, color: string): string[] {
-  const rows: string[] = [];
-  rows.push(`${BOLD}${color}${label}${RESET}`);
-  for (const [, key] of PIECE_KEYS) {
-    const v = m[key] ?? 0;
-    if (v !== 0) rows.push(`${color}${key.padEnd(8)} ${BOLD}${String(v).padStart(2)}${RESET}`);
-  }
-  if (rows.length === 1) rows.push(`${DIM}(none)${RESET}`);
-  return rows;
-}
-
-// ------- Colored board renderer with sidebar -------
-function boardWithSidebar(board: Board): string {
-  // 17 rows; these are the counts per ring row in your current ASCII layout
-  const widths = [9,11,13,15, 17,17,17,17,17,17,17,17,17, 15,13,11,9];
-  const lines: string[] = [];
-  let base = 1;
-
-  // Build side panel content
-  const onBoard = countsOnBoard(board);
-  const hostOn = countsToLines("HOST on board", onBoard.host, FG_HOST);
-  const guestOn = countsToLines("GUEST on board", onBoard.guest, FG_GUEST);
-
-  let hostRem: string[] = [];
-  let guestRem: string[] = [];
-  if (POOL_DEFAULTS) {
-    const hostRemaining = minusCounts(POOL_DEFAULTS.host, onBoard.host);
-    const guestRemaining = minusCounts(POOL_DEFAULTS.guest, onBoard.guest);
-    hostRem = countsToLines("HOST remaining", hostRemaining, FG_HOST);
-    guestRem = countsToLines("GUEST remaining", guestRemaining, FG_GUEST);
-  }
-
-
-  const sidebar: string[] = [];
-  // Compose sidebar lines: titles + lists (trim to ~17–20 lines)
-  sidebar.push(...hostOn, "", ...guestOn);
-  if (POOL_DEFAULTS) {
-    sidebar.push("", `${DIM}Pools (remaining)${RESET}`, ...hostRem, "", ...guestRem);
-  }
-
-  const sidebarPad = "   "; // space between board and panel
-  let sideIdx = 0;
-
-  for (let r = 0; r < widths.length; r++) {
-    const w = widths[r];
-    const padLeft = " ".repeat((17 - w));
-    const cells: string[] = [];
-
-    for (let c = 0; c < w; c++) {
-      const idx = base + c;
-      const p = board.getAtIndex(idx);
-      // Derive XY from your ring indexing
-      const { x, y } = coordsOf(idx - 1);
-      const bg = isGateCoord(x, y) ? BG_GATE : cellBg(x, y);
-
-      if (!p) {
-        cells.push(`${bg}${DIM}· ${RESET}`);
-      } else {
-        const d = unpackPiece(p)!;
-        const fg = d.owner === Owner.Host ? FG_HOST : FG_GUEST;
-        const sym = symOf(d.type);
-        cells.push(`${bg}${fg}${BOLD}${sym}${RESET}`);
-      }
-    }
-
-    const boardLine = padLeft + cells.join("") + padLeft;
-    const sideLine = sidebar[sideIdx] ?? "";
-    lines.push(boardLine + sidebarPad + sideLine);
-    sideIdx++;
-    base += w;
-  }
-
-  return lines.join("\n");
-}
 // ---------- Game loop ----------
 async function main() {
-  const b = new Board(); // EMPTY START
+  const b = new Board(); // start empty by default
   let toMove: Side = FIRST;
 
   console.log(`You are ${HUMAN}. ${FIRST} moves first. Depth=${DEPTH}${TIMEMS ? ` Time=${TIMEMS}ms` : ""}`);
   console.log(boardWithSidebar(b));
   help();
 
-  // If engine is to move first and human != first, let engine move
+  // If engine is to move first
   if (toMove !== HUMAN) {
     const t0 = performance.now();
     const mv = pickBestMove(b, toMove, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
     const t1 = performance.now();
     printMove(mv);
-    if (mv) {
+    if (mv && isMoveSane(b, mv)) {
       const nb = applyAnyMove(b, toMove, mv);
       copyBoard(b, nb);
       toMove = other(toMove);
@@ -365,31 +332,27 @@ async function main() {
     if (line.toLowerCase() === "print") { console.log(boardWithSidebar(b)); continue; }
 
     try {
-if (line.toLowerCase().startsWith("engine")) {
-  const t0 = performance.now();
-  const mv = pickBestMove(b, toMove, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
-  const t1 = performance.now();
+      if (line.toLowerCase().startsWith("engine")) {
+        const t0 = performance.now();
+        const mv = pickBestMove(b, toMove, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
+        const t1 = performance.now();
 
-  if (!mv) {
-    console.log("Engine: no move.");
-  } else if (!isMoveSane(b, mv)) {
-    console.log("Engine produced an invalid/unsane move (defensive check). Skipping.");
-    printMove(mv); // still show what it tried to do
-  } else {
-    printMove(mv);
-    try {
-      const nb = applyAnyMove(b, toMove, mv);
-      copyBoard(b, nb);
-      toMove = toMove === "host" ? "guest" : "host";
-    } catch (e: any) {
-      console.log(`Apply failed: ${e?.message ?? e}. Skipping.`);
-    }
-  }
+        if (!mv) {
+          console.log("Engine: no move.");
+        } else if (!isMoveSane(b, mv)) {
+          console.log("Engine produced an invalid/unsane move (defensive check). Skipping.");
+          printMove(mv);
+        } else {
+          printMove(mv);
+          const nb = applyAnyMove(b, toMove, mv);
+          copyBoard(b, nb);
+          toMove = other(toMove);
+        }
 
-  console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
-  console.log(boardWithSidebar(b));
-  continue;
-}
+        console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
+        console.log(boardWithSidebar(b));
+        continue;
+      }
 
       if (line.toLowerCase().startsWith("arr ")) {
         // arr x,y -> a,b; c,d; ...
@@ -457,7 +420,7 @@ if (line.toLowerCase().startsWith("engine")) {
       }
 
       if (line.toLowerCase().startsWith("place ")) {
-        // place type owner x,y
+        // place TYPE OWNER x,y
         // e.g. place R3 host 0,0
         const parts = line.trim().split(/\s+/);
         if (parts.length !== 4) throw new Error("Use: place TYPE OWNER x,y");
