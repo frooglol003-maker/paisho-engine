@@ -4,35 +4,26 @@
 
 import * as fs from "fs";
 import * as readline from "readline";
-import { Board, TypeId, unpackPiece, packPiece } from "./board";
+import { Board, TypeId, Owner, unpackPiece, packPiece } from "./board";
 import { indexOf } from "./coords";
-import {
-  planWheelRotate,
-  planBoatOnFlower,
-  planBoatOnAccent,
-} from "./rules";
-import {
-  validateArrange,
-} from "./move";
-import {
-  applyPlannedArrange,
-} from "./engine";
+import { planWheelRotate, planBoatOnFlower, planBoatOnAccent } from "./rules";
+import { validateArrange } from "./move";
+import { applyPlannedArrange } from "./engine";
 
 // ====== Types ======
-
 export type Side = "host" | "guest";
 export type Result = "host" | "guest" | "draw";
 
 export type Placement = {
   owner: Side;
-  type: keyof typeof TypeIdNames;
-  index?: number;
-  x?: number;
+  type: keyof typeof TypeIdNames; // "R3"|"W4"|...
+  index?: number; // 1-based index
+  x?: number;     // optional (x,y) instead of index
   y?: number;
 };
 
 export type Action =
-  | { kind: "arrange"; side: Side; from: number; path: number[] }
+  | { kind: "arrange"; side: Side; from: number; path: number[] } // indices 1-based
   | { kind: "wheel"; side: Side; center: number }
   | { kind: "boatFlower"; side: Side; boat: number; from: number; to: number }
   | { kind: "boatAccent"; side: Side; boat: number; target: number };
@@ -45,7 +36,6 @@ export type GameRecord = {
 };
 
 // ====== Mapping piece names -> TypeId ======
-
 export const TypeIdNames: Record<string, TypeId> = {
   R3: TypeId.R3,
   R4: TypeId.R4,
@@ -62,7 +52,6 @@ export const TypeIdNames: Record<string, TypeId> = {
 };
 
 // ====== Helpers ======
-
 function toIndex1FromPlacement(p: Placement): number {
   if (typeof p.index === "number") return p.index;
   if (typeof p.x === "number" && typeof p.y === "number") {
@@ -73,8 +62,8 @@ function toIndex1FromPlacement(p: Placement): number {
   throw new Error("Placement needs either index or (x,y).");
 }
 
-function toOwnerBit(owner: Side): 0 | 1 {
-  return owner === "host" ? 0 : 1;
+function toOwnerEnum(owner: Side): Owner {
+  return owner === "host" ? Owner.Host : Owner.Guest;
 }
 
 function typeFromName(name: string): TypeId {
@@ -87,18 +76,21 @@ export function applySetup(board: Board, setup?: Placement[]) {
   if (!setup) return;
   for (const pl of setup) {
     const idx1 = toIndex1FromPlacement(pl);
-    const packed = packPiece(toOwnerBit(pl.owner), typeFromName(pl.type));
+    // IMPORTANT: your packPiece = (type, owner)
+    const packed = packPiece(typeFromName(pl.type), toOwnerEnum(pl.owner));
     board.setAtIndex(idx1, packed);
   }
 }
 
-export function applyArrange(board: Board, side: Side, from: number, path: number[]) {
+// Arrange via validator + apply
+export function applyArrange(board: Board, _side: Side, from: number, path: number[]) {
   const ok = validateArrange(board, from, path);
   if (!ok.ok) throw new Error(`arrange invalid: ${ok.reason ?? "unknown"}`);
   return applyPlannedArrange(board, { from, path });
 }
 
-export function applyWheel(board: Board, side: Side, center: number) {
+// Wheel: plan then apply rotation (no mutation here)
+export function applyWheel(board: Board, _side: Side, center: number) {
   const plan = planWheelRotate(board, center);
   if (!plan.ok) throw new Error(`wheel invalid: ${plan.reason}`);
   const cloned = board.clone();
@@ -115,7 +107,8 @@ export function applyWheel(board: Board, side: Side, center: number) {
   return cloned;
 }
 
-export function applyBoatFlower(board: Board, side: Side, boat: number, from: number, to: number) {
+// Boat-on-flower: move a BLOOMING flower one step
+export function applyBoatFlower(board: Board, _side: Side, _boat: number, from: number, to: number) {
   const plan = planBoatOnFlower(board, from, to);
   if (!plan.ok) throw new Error(`boatFlower invalid: ${plan.reason}`);
   const cloned = board.clone();
@@ -127,7 +120,8 @@ export function applyBoatFlower(board: Board, side: Side, boat: number, from: nu
   return cloned;
 }
 
-export function applyBoatAccent(board: Board, side: Side, boat: number, target: number) {
+// Boat-on-accent: remove BOTH the boat and the target accent
+export function applyBoatAccent(board: Board, _side: Side, boat: number, target: number) {
   const res = planBoatOnAccent(board, target, boat);
   if (!res.ok) throw new Error(`boatAccent invalid: ${res.reason}`);
   const cloned = board.clone();
@@ -145,6 +139,7 @@ export function applyAction(board: Board, action: Action): Board {
   }
 }
 
+// Load JSONL file -> GameRecord[]
 export async function loadGames(jsonlPath: string): Promise<GameRecord[]> {
   const games: GameRecord[] = [];
   const rl = readline.createInterface({
