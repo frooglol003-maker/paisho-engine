@@ -1,0 +1,15 @@
+{
+  "name": "paisho-engine",
+  "version": "0.1.0",
+  "description": "Pai Sho engine prototype (coords, rules, move validation, basic minimax)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node ./dist/tests/run-tests.js || node ./tests/run-tests.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "license": "MIT"
+}
