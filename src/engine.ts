@@ -1,22 +1,22 @@
 // src/engine.ts
-// Multi-step Arrange move gen + tiny negamax search + Harmony Bonus generators.
-// NOTE: Board indices are 1-based (1..249). coords/index helpers are 0-based (0..248).
+// Multi-step Arrange move gen + fast alpha–beta search + Harmony Bonus generators.
+// Board indices are 1-based (1..249). coords/index helpers are 0-based (0..248).
 
+import { performance } from "perf_hooks";
 import { coordsOf, indexOf } from "./coords";
 import { Board, unpackPiece, TypeId } from "./board";
 import { getPieceDescriptor, planWheelRotate, planBoatOnFlower, planBoatOnAccent } from "./rules";
 import { validateArrange } from "./move";
 import { evaluate } from "./eval";
-// --- performance / search helpers
-import { evaluate } from "./eval";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
 
 // ---------- Types ----------
 export type Side = "host" | "guest";
+
 // Arrange move: a path of 1-based indices from a source
 export type PlannedArrange = { from: number; path: number[] };
 
-// (Internal types only — do NOT export to avoid name clashes with rules.ts)
+// (Internal types only — not exported)
 type _IndexMove = { from: number; to: number };
 type _WheelPlan = { center: number; moves: _IndexMove[] };
 type _BoatFlowerPlan = { boat: number; from: number; to: number };
@@ -34,7 +34,7 @@ function belongsTo(packed: number | null, side: Side): boolean {
 // Generate all simple orthogonal neighbors (1 step) as 1-based indices
 function* orthoNeighbors1(idx1: number): Iterable<number> {
   const { x, y } = coordsOf(idx1 - 1);
-  const cands = [{x:x+1,y},{x:x-1,y},{x,y:y+1},{x,y:y-1}];
+  const cands = [{ x: x + 1, y }, { x: x - 1, y }, { x, y: y + 1 }, { x, y: y - 1 }];
   for (const c of cands) {
     const t0 = indexOf(c.x, c.y);
     if (t0 !== -1) yield t0 + 1;
@@ -65,9 +65,8 @@ function* neighbors8(idx1: number): Iterable<number> {
     }
   }
 }
-// ---------- Search core (alpha–beta + ordering + TT + time limit) ----------
-type Side = "host" | "guest";
 
+// ---------- Search core (alpha–beta + ordering + TT + time limit) ----------
 type ArrangeMove = { kind: "arrange"; from: number; path: number[] };
 type WheelMove   = { kind: "wheel"; center: number };
 type BoatFlower  = { kind: "boatFlower"; boat: number; from: number; to: number };
@@ -86,9 +85,8 @@ interface TTEntry {
 
 const TT = new Map<string, TTEntry>();
 
-function boardKey(board: import("./board").Board, side: Side): string {
+function boardKey(board: Board, side: Side): string {
   const N: number = (board as any).size1Based ?? 249;
-  // Very simple (but collision-safe-enough) key
   let s = side === "host" ? "H|" : "G|";
   for (let i = 1; i <= N; i++) {
     const v = board.getAtIndex(i) || 0;
@@ -98,8 +96,8 @@ function boardKey(board: import("./board").Board, side: Side): string {
 }
 
 // Make move on a cloned board and return it.
-// Uses your existing apply* helpers so we keep one source of truth.
-function applyMoveCloned(board: import("./board").Board, side: Side, mv: AnyMove) {
+// Uses existing apply* helpers so we keep one source of truth.
+function applyMoveCloned(board: Board, side: Side, mv: AnyMove): Board {
   switch (mv.kind) {
     case "arrange":     return applyPlannedArrange(board, { from: mv.from, path: mv.path });
     case "wheel":       return applyWheel(board, side, mv.center);
@@ -108,8 +106,8 @@ function applyMoveCloned(board: import("./board").Board, side: Side, mv: AnyMove
   }
 }
 
-// Generate all candidate moves. We call your existing generators if present.
-function generateAllMoves(board: import("./board").Board, side: Side): AnyMove[] {
+// Generate all candidate moves. We call existing generators if present.
+function generateAllMoves(board: Board, side: Side): AnyMove[] {
   const moves: AnyMove[] = [];
 
   // Arrange
@@ -119,7 +117,7 @@ function generateAllMoves(board: import("./board").Board, side: Side): AnyMove[]
     }
   } catch {}
 
-  // Bonus: Wheel / Boat (safe if you haven’t planted those tiles yet)
+  // Bonus: Wheel / Boat
   try {
     for (const c of generateWheelBonusMoves(board, side)) {
       moves.push({ kind: "wheel", center: c.center });
@@ -139,9 +137,8 @@ function generateAllMoves(board: import("./board").Board, side: Side): AnyMove[]
   return moves;
 }
 
-// Simple move-ordering: try "promising" moves first to help alpha–beta prune.
-// Heuristic: shallow eval of the child, plus prefer shorter paths (tactical) and central landing.
-function orderMoves(board: import("./board").Board, side: Side, moves: AnyMove[]): AnyMove[] {
+// Move ordering heuristic: shallow eval of child + center bias + short paths first.
+function orderMoves(board: Board, side: Side, moves: AnyMove[]): AnyMove[] {
   const scored = moves.map(mv => {
     let landingIdx1 = -1;
     if (mv.kind === "arrange") landingIdx1 = mv.path[mv.path.length - 1];
@@ -149,7 +146,7 @@ function orderMoves(board: import("./board").Board, side: Side, moves: AnyMove[]
 
     let centerBias = 0;
     if (landingIdx1 > 0) {
-      const { x, y } = require("./coords").coordsOf(landingIdx1 - 1);
+      const { x, y } = coordsOf(landingIdx1 - 1);
       centerBias = -(Math.abs(x) + Math.abs(y)); // closer is better
     }
 
@@ -162,7 +159,6 @@ function orderMoves(board: import("./board").Board, side: Side, moves: AnyMove[]
     }
 
     const shortPathBias = mv.kind === "arrange" ? -mv.path.length : 0;
-
     return { mv, key: val * 1000 + centerBias * 10 + shortPathBias };
   });
 
@@ -178,7 +174,7 @@ interface SearchOpts {
 }
 
 function searchAlphaBeta(
-  board: import("./board").Board,
+  board: Board,
   side: Side,
   depth: number,
   alpha: Score,
@@ -187,7 +183,6 @@ function searchAlphaBeta(
   opts: SearchOpts
 ): { score: Score, best?: AnyMove } {
   if (opts.maxMs && performance.now() - startMs > opts.maxMs) {
-    // Return a quiescent-ish eval to keep iterative deepening stable
     return { score: evaluate(board, side) };
   }
 
@@ -206,7 +201,6 @@ function searchAlphaBeta(
 
   const moves = orderMoves(board, side, generateAllMoves(board, side));
   if (moves.length === 0) {
-    // No legal move: evaluate as-is (could be pass, but we don’t model pass)
     return { score: evaluate(board, side) };
   }
 
@@ -215,7 +209,7 @@ function searchAlphaBeta(
   let value = -Infinity as Score;
 
   for (const mv of moves) {
-    let child: import("./board").Board | undefined;
+    let child: Board;
     try { child = applyMoveCloned(board, side, mv); }
     catch { continue; }
 
@@ -238,9 +232,8 @@ function searchAlphaBeta(
 }
 
 // Iterative deepening wrapper with optional time limit.
-// Returns best move from the deepest fully completed iteration.
 function searchIterativeDeepening(
-  board: import("./board").Board,
+  board: Board,
   side: Side,
   maxDepth: number,
   maxMs?: number
@@ -252,7 +245,6 @@ function searchIterativeDeepening(
   for (let d = 1; d <= maxDepth; d++) {
     const { best } = searchAlphaBeta(board, side, d, -Infinity, Infinity, start, { maxDepth, maxMs });
     if (best) lastBest = best;
-
     if (maxMs && performance.now() - start > maxMs) break;
   }
   return lastBest;
@@ -277,6 +269,7 @@ export function generateLegalArrangeMoves(board: Board, side: Side): PlannedArra
     if (limit <= 0) continue;
 
     const seen = new Set<number>([i]);
+
     function dfs(path: number[]) {
       if (path.length > limit) return;
 
@@ -298,6 +291,7 @@ export function generateLegalArrangeMoves(board: Board, side: Side): PlannedArra
         seen.delete(nxt);
       }
     }
+
     dfs([]);
   }
 
@@ -316,50 +310,13 @@ export function applyPlannedArrange(board: Board, mv: PlannedArrange): Board {
   return cloned;
 }
 
-// ---------- Search (negamax on Arrange moves) ----------
-export function pickBestMove(board: import("./board").Board, side: Side, depth: number, opts?: { maxMs?: number }) {
+// ---------- Public search entry ----------
+export function pickBestMove(board: Board, side: Side, depth: number, opts?: { maxMs?: number }) {
   const move = searchIterativeDeepening(board, side, depth, opts?.maxMs);
   return move || null;
 }
 
-  let bestScore = -Infinity;
-  let best: PlannedArrange | null = null;
-  let alpha = -Infinity;
-  const beta = Infinity;
-
-  for (const mv of moves) {
-    const child = applyPlannedArrange(board, mv);
-    const score = -negamax(child, opposite(side), depth - 1, -beta, -alpha);
-    if (score > bestScore) {
-      bestScore = score;
-      best = mv;
-      if (score > alpha) alpha = score;
-    }
-  }
-
-  return best;
-}
-
-function negamax(board: Board, side: Side, depth: number, alpha: number, beta: number): number {
-  if (depth <= 0) return evaluate(board, side);
-
-  const moves = generateLegalArrangeMoves(board, side);
-  if (moves.length === 0) return -1e6;
-
-  let value = -Infinity;
-  for (const mv of moves) {
-    const child = applyPlannedArrange(board, mv);
-    const v = -negamax(child, opposite(side), depth - 1, -beta, -alpha);
-    if (v > value) value = v;
-    if (value > alpha) alpha = value;
-    if (alpha >= beta) break;
-  }
-  return value;
-}
-
-// ---------------- Harmony Bonus move generation (append-only) ----------------
-// These are exposed as functions but keep their plan types internal to avoid export name clashes.
-
+// ---------------- Harmony Bonus move generation ----------------
 export function generateWheelBonusMoves(board: Board, side: Side): _WheelPlan[] {
   const out: _WheelPlan[] = [];
   const N = (board as any).size1Based ?? 249;
@@ -411,11 +368,10 @@ export function generateBoatAccentBonusMoves(board: Board, side: Side): _BoatAcc
       const p = board.getAtIndex(target);
       if (!p) continue;
       const d = unpackPiece(p)!;
-      const isAccent = (
-        d.type === TypeId.Rock || d.type === TypeId.Wheel || d.type === TypeId.Boat || d.type === TypeId.Knotweed
-      );
+      const isAccent =
+        d.type === TypeId.Rock || d.type === TypeId.Wheel || d.type === TypeId.Boat || d.type === TypeId.Knotweed;
       if (!isAccent) continue;
-      if (d.type === TypeId.Boat) continue;
+      if (d.type === TypeId.Boat) continue; // must be a non-boat accent
 
       const res = planBoatOnAccent(board, target, b);
       if (res.ok) out.push({ boat: b, remove: res.remove.map(r => r.remove) });
