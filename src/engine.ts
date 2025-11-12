@@ -7,6 +7,9 @@ import { Board, unpackPiece, TypeId } from "./board";
 import { getPieceDescriptor, planWheelRotate, planBoatOnFlower, planBoatOnAccent } from "./rules";
 import { validateArrange } from "./move";
 import { evaluate } from "./eval";
+// --- performance / search helpers
+import { evaluate } from "./eval";
+import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
 
 // ---------- Types ----------
 export type Side = "host" | "guest";
@@ -61,6 +64,198 @@ function* neighbors8(idx1: number): Iterable<number> {
       if (t0 !== -1) yield t0 + 1;
     }
   }
+}
+// ---------- Search core (alpha–beta + ordering + TT + time limit) ----------
+type Side = "host" | "guest";
+
+type ArrangeMove = { kind: "arrange"; from: number; path: number[] };
+type WheelMove   = { kind: "wheel"; center: number };
+type BoatFlower  = { kind: "boatFlower"; boat: number; from: number; to: number };
+type BoatAccent  = { kind: "boatAccent"; boat: number; target: number };
+type AnyMove = ArrangeMove | WheelMove | BoatFlower | BoatAccent;
+
+type Score = number;
+type TTFlag = "EXACT" | "LOWER" | "UPPER";
+
+interface TTEntry {
+  depth: number;      // remaining depth when stored
+  score: Score;       // score from side-to-move POV when stored
+  flag: TTFlag;
+  best?: AnyMove;
+}
+
+const TT = new Map<string, TTEntry>();
+
+function boardKey(board: import("./board").Board, side: Side): string {
+  const N: number = (board as any).size1Based ?? 249;
+  // Very simple (but collision-safe-enough) key
+  let s = side === "host" ? "H|" : "G|";
+  for (let i = 1; i <= N; i++) {
+    const v = board.getAtIndex(i) || 0;
+    s += v.toString(16) + ",";
+  }
+  return s;
+}
+
+// Make move on a cloned board and return it.
+// Uses your existing apply* helpers so we keep one source of truth.
+function applyMoveCloned(board: import("./board").Board, side: Side, mv: AnyMove) {
+  switch (mv.kind) {
+    case "arrange":     return applyPlannedArrange(board, { from: mv.from, path: mv.path });
+    case "wheel":       return applyWheel(board, side, mv.center);
+    case "boatFlower":  return applyBoatFlower(board, side, mv.boat, mv.from, mv.to);
+    case "boatAccent":  return applyBoatAccent(board, side, mv.boat, mv.target);
+  }
+}
+
+// Generate all candidate moves. We call your existing generators if present.
+function generateAllMoves(board: import("./board").Board, side: Side): AnyMove[] {
+  const moves: AnyMove[] = [];
+
+  // Arrange
+  try {
+    for (const m of generateLegalArrangeMoves(board, side)) {
+      moves.push({ kind: "arrange", from: m.from, path: m.path });
+    }
+  } catch {}
+
+  // Bonus: Wheel / Boat (safe if you haven’t planted those tiles yet)
+  try {
+    for (const c of generateWheelBonusMoves(board, side)) {
+      moves.push({ kind: "wheel", center: c.center });
+    }
+  } catch {}
+  try {
+    for (const b of generateBoatFlowerBonusMoves(board, side)) {
+      moves.push({ kind: "boatFlower", boat: b.boat, from: b.from, to: b.to });
+    }
+  } catch {}
+  try {
+    for (const k of generateBoatAccentBonusMoves(board, side)) {
+      moves.push({ kind: "boatAccent", boat: k.boat, target: k.target });
+    }
+  } catch {}
+
+  return moves;
+}
+
+// Simple move-ordering: try "promising" moves first to help alpha–beta prune.
+// Heuristic: shallow eval of the child, plus prefer shorter paths (tactical) and central landing.
+function orderMoves(board: import("./board").Board, side: Side, moves: AnyMove[]): AnyMove[] {
+  const scored = moves.map(mv => {
+    let landingIdx1 = -1;
+    if (mv.kind === "arrange") landingIdx1 = mv.path[mv.path.length - 1];
+    else if (mv.kind === "boatFlower") landingIdx1 = mv.to;
+
+    let centerBias = 0;
+    if (landingIdx1 > 0) {
+      const { x, y } = require("./coords").coordsOf(landingIdx1 - 1);
+      centerBias = -(Math.abs(x) + Math.abs(y)); // closer is better
+    }
+
+    let val = 0;
+    try {
+      const child = applyMoveCloned(board, side, mv);
+      val = evaluate(child, side);
+    } catch {
+      val = -1e9; // illegal/failed moves pushed to end
+    }
+
+    const shortPathBias = mv.kind === "arrange" ? -mv.path.length : 0;
+
+    return { mv, key: val * 1000 + centerBias * 10 + shortPathBias };
+  });
+
+  scored.sort((a, b) => b.key - a.key);
+  return scored.map(s => s.mv);
+}
+
+function other(side: Side): Side { return side === "host" ? "guest" : "host"; }
+
+interface SearchOpts {
+  maxDepth: number;
+  maxMs?: number; // soft time limit
+}
+
+function searchAlphaBeta(
+  board: import("./board").Board,
+  side: Side,
+  depth: number,
+  alpha: Score,
+  beta: Score,
+  startMs: number,
+  opts: SearchOpts
+): { score: Score, best?: AnyMove } {
+  if (opts.maxMs && performance.now() - startMs > opts.maxMs) {
+    // Return a quiescent-ish eval to keep iterative deepening stable
+    return { score: evaluate(board, side) };
+  }
+
+  const key = boardKey(board, side);
+  const tt = TT.get(key);
+  if (tt && tt.depth >= depth) {
+    if (tt.flag === "EXACT") return { score: tt.score, best: tt.best };
+    if (tt.flag === "LOWER" && tt.score > alpha) alpha = tt.score;
+    else if (tt.flag === "UPPER" && tt.score < beta) beta = tt.score;
+    if (alpha >= beta) return { score: tt.score, best: tt.best };
+  }
+
+  if (depth === 0) {
+    return { score: evaluate(board, side) };
+  }
+
+  const moves = orderMoves(board, side, generateAllMoves(board, side));
+  if (moves.length === 0) {
+    // No legal move: evaluate as-is (could be pass, but we don’t model pass)
+    return { score: evaluate(board, side) };
+  }
+
+  let best: AnyMove | undefined;
+  let localAlpha = alpha;
+  let value = -Infinity as Score;
+
+  for (const mv of moves) {
+    let child: import("./board").Board | undefined;
+    try { child = applyMoveCloned(board, side, mv); }
+    catch { continue; }
+
+    const { score: childScore } =
+      searchAlphaBeta(child, other(side), depth - 1, -beta, -localAlpha, startMs, opts);
+
+    const v = -childScore;
+    if (v > value) { value = v; best = mv; }
+    if (v > localAlpha) localAlpha = v;
+    if (localAlpha >= beta) break; // beta cutoff
+  }
+
+  // Store in TT
+  let flag: TTFlag = "EXACT";
+  if (value <= alpha) flag = "UPPER";
+  else if (value >= beta) flag = "LOWER";
+  TT.set(key, { depth, score: value, flag, best });
+
+  return { score: value, best };
+}
+
+// Iterative deepening wrapper with optional time limit.
+// Returns best move from the deepest fully completed iteration.
+function searchIterativeDeepening(
+  board: import("./board").Board,
+  side: Side,
+  maxDepth: number,
+  maxMs?: number
+): AnyMove | null {
+  TT.clear();
+  const start = performance.now();
+  let lastBest: AnyMove | null = null;
+
+  for (let d = 1; d <= maxDepth; d++) {
+    const { best } = searchAlphaBeta(board, side, d, -Infinity, Infinity, start, { maxDepth, maxMs });
+    if (best) lastBest = best;
+
+    if (maxMs && performance.now() - start > maxMs) break;
+  }
+  return lastBest;
 }
 
 // ---------- Move gen (multi-step Arrange via DFS bounded by tile limit) ----------
