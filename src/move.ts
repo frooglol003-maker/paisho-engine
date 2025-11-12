@@ -1,6 +1,7 @@
 // move.ts
 // Move validation, clash detection, harmony graph and ring detection.
 
+import { isHarmonyActivePair } from "./rules";
 import { generateValidPoints, coordsOf, indexOf } from "./coords";
 import { Board, unpackPiece, TypeId } from "./board";
 import { getPieceDescriptor, isClashPair, harmoniousPair, ownerHasBloomingLotus, getGardenType, isGateCoord } from "./rules";
@@ -152,13 +153,25 @@ export function buildHarmonyGraph(board: Board): Map<number, number[]> {
       const aC = coordsOf(aIdx), bC = coordsOf(bIdx);
       if (aC.x !== bC.x && aC.y !== bC.y) continue;
       if (!lineOfSightClear(board, aIdx, bIdx)) continue;
-      if (harmoniousPair(a.garden, a.number, b.garden, b.number)) {
-        graph.set(aIdx, (graph.get(aIdx) || []).concat(bIdx));
-        graph.set(bIdx, (graph.get(bIdx) || []).concat(aIdx));
-      } else {
-        // Lotus interactions (lotus harmonizes with any basic) — handled elsewhere when lotus present.
-        // TODO: add lotus edges if a lotus owned by someone participates on the same axis.
-      }
+      // NOTE: aIdx/bIdx should be the same indexing you use for Board.getAtIndex.
+// If elsewhere in this function you call board.getAtIndex(aIdx), they're 1-based.
+// If they are 0-based, use (aIdx+1) / (bIdx+1) below instead.
+
+const aGarden = a.garden as ("R" | "W");
+const bGarden = b.garden as ("R" | "W");
+const aNum = a.number as (3 | 4 | 5);
+const bNum = b.number as (3 | 4 | 5);
+
+const aIndexForBoard = aIdx; // or aIdx + 1 if your board uses 1-based here
+const bIndexForBoard = bIdx; // or bIdx + 1 if your board uses 1-based here
+
+if (isHarmonyActivePair(board, aIndexForBoard, bIndexForBoard, aGarden, aNum, bGarden, bNum)) {
+  graph.set(aIdx, (graph.get(aIdx) || []).concat(bIdx));
+  graph.set(bIdx, (graph.get(bIdx) || []).concat(aIdx));
+} else {
+  // Lotus interactions (lotus harmonizes with any basic) — handled elsewhere when lotus present.
+  // TODO: add lotus edges if a lotus owned by someone participates on the same axis.
+}
     }
   }
   return graph;
