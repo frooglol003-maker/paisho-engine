@@ -1,0 +1,33 @@
+// One JSON object per line. Lines starting with // are ignored.
+// IMPORTANT: indices are 1-based.
+//
+// MINIMAL EXAMPLE: one micro position with a single arrange move and a host win.
+{"id":"ex1","setup":[
+  {"owner":"host","type":"R3","index":125},
+  {"owner":"guest","type":"W3","index":126}
+],"moves":[
+  {"kind":"arrange","side":"host","from":125,"path":[126]}
+],"result":"host"}
+
+// WHEEL example (center must be a Wheel owned by side; neighbors exist)
+// {"id":"wheel1","setup":[
+//   {"owner":"host","type":"Wheel","index":125},
+//   {"owner":"host","type":"R3","index":124}
+// ],"moves":[
+//   {"kind":"wheel","side":"host","center":125}
+// ],"result":"host"}
+
+// BOAT examples
+// {"id":"boatFlower1","setup":[
+//   {"owner":"host","type":"Boat","index":125},
+//   {"owner":"host","type":"R4","index":124}
+// ],"moves":[
+//   {"kind":"boatFlower","side":"host","boat":125,"from":124,"to":123}
+// ],"result":"host"}
+
+// {"id":"boatAccent1","setup":[
+//   {"owner":"host","type":"Boat","index":125},
+//   {"owner":"guest","type":"Rock","index":124}
+// ],"moves":[
+//   {"kind":"boatAccent","side":"host","boat":125,"target":124}
+// ],"result":"host"}
