@@ -7,17 +7,12 @@
   "scripts": {
     "build": "tsc",
     "test": "node dist/tests/run-tests.js",
-    "learn": "ts-node src/learn.ts"
+    "learn": "ts-node src/learn.ts",
+    "demo": "ts-node src/demo.ts"
   },
   "devDependencies": {
-    "typescript": "^5.6.3",
+    "@types/node": "^20.11.30",
     "ts-node": "^10.9.2",
-    "@types/node": "^20.11.30"
-  }
-  "scripts": {
-  "build": "tsc",
-  "test": "node dist/tests/run-tests.js",
-  "learn": "ts-node src/learn.ts",
-  "demo": "ts-node src/demo.ts"
+    "typescript": "^5.6.3"
   }
 }
