@@ -1,1 +1,3 @@
 {"id":"ex1","setup":[{"owner":"host","type":"R3","index":125},{"owner":"guest","type":"W3","index":126}],"moves":[{"kind":"arrange","side":"host","from":125,"path":[126]}],"result":"host"}
+{"id":"xy1","setup":[{"owner":"host","type":"R3","x":0,"y":0},{"owner":"guest","type":"W3","x":1,"y":0}],"moves":[{"kind":"arrangeXY","side":"host","fromXY":[0,0],"pathXY":[[1,0]]}],"result":"host"}
+{"id":"xy2","setup":[{"owner":"guest","type":"W4","x":0,"y":1},{"owner":"host","type":"R4","x":0,"y":-1}],"moves":[{"kind":"arrangeXY","side":"guest","fromXY":[0,1],"pathXY":[[0,0]]}],"result":"guest"}
