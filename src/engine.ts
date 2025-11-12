@@ -117,25 +117,55 @@ function generateAllMoves(board: Board, side: Side): AnyMove[] {
     }
   } catch {}
 
-  // Bonus: Wheel / Boat
-  try {
-    for (const c of generateWheelBonusMoves(board, side)) {
-      moves.push({ kind: "wheel", center: c.center });
-    }
-  } catch {}
-  try {
-    for (const b of generateBoatFlowerBonusMoves(board, side)) {
-      moves.push({ kind: "boatFlower", boat: b.boat, from: b.from, to: b.to });
-    }
-  } catch {}
-  try {
-    for (const k of generateBoatAccentBonusMoves(board, side)) {
-      moves.push({ kind: "boatAccent", boat: k.boat, target: k.target });
-    }
-  } catch {}
+    // Bonus: Wheel / Boat (robust, deduped, prechecked)
+  {
+    const seen = new Set<string>();
+    const safePush = (mv: AnyMove) => {
+      // de-dupe by a stable key
+      const key = JSON.stringify(mv);
+      if (seen.has(key)) return;
+      // quick legality probe on a clone; skip if it throws
+      try {
+        void applyMoveCloned(board, side, mv);
+        seen.add(key);
+        moves.push(mv);
+      } catch {
+        /* ignore unplayable bonus */
+      }
+    };
+
+    // Wheel
+    try {
+      for (const c of generateWheelBonusMoves(board, side)) {
+        if (typeof c.center === "number") {
+          safePush({ kind: "wheel", center: c.center });
+        }
+      }
+    } catch { /* generator not available or failed */ }
+
+    // Boat on flower
+    try {
+      for (const b of generateBoatFlowerBonusMoves(board, side)) {
+        if (typeof b.boat === "number" && typeof b.from === "number" && typeof b.to === "number" && b.from !== b.to) {
+          safePush({ kind: "boatFlower", boat: b.boat, from: b.from, to: b.to });
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Boat on accent
+    try {
+      for (const k of generateBoatAccentBonusMoves(board, side)) {
+        // some plan types may omit target; prefer the explicit one
+        const target = (k as any).target as number | undefined;
+        if (typeof k.boat === "number" && typeof target === "number") {
+          safePush({ kind: "boatAccent", boat: k.boat, target });
+        }
+      }
+    } catch { /* ignore */ }
+  }
 
   return moves;
-}
+
 
 // Move ordering heuristic: shallow eval of child + center bias + short paths first.
 function orderMoves(board: Board, side: Side, moves: AnyMove[]): AnyMove[] {
