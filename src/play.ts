@@ -412,43 +412,65 @@ async function main() {
         continue;
       }
 
-      // Engine action (plant if opening, else search)
-      if (line.toLowerCase().startsWith("engine")) {
-        const t0 = performance.now();
+     // Engine action (plant if opening, else search)
+// Usage: "engine", "engine host", "engine guest", "engine me", "engine other"
+const engMatch = line.toLowerCase().match(/^engine(?:\s+(host|guest|me|other))?$/);
+if (engMatch) {
+  const want = engMatch[1]; // may be undefined
+  let sideToPlay: Side = toMove;
 
-        if (isEmptyBoard(b)) {
-          const t = enginePickOpeningType(toMove);
-          if (t) {
-            plantOpening(b, toMove, t);
-            const t1 = performance.now();
-            console.log(`Engine → PLANT ${TypeId[t]} at gate (${gateFor(toMove).x},${gateFor(toMove).y}), mirrored.`);
-            // guest moves again after plant
-            if (toMove === "host") toMove = "guest";
-            console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
-            console.log(boardWithSidebar(b));
-            continue;
-          }
-        }
+  if (want === "host" || want === "guest") {
+    sideToPlay = want as Side;
+  } else if (want === "me") {
+    sideToPlay = HUMAN;
+  } else if (want === "other") {
+    sideToPlay = HUMAN === "host" ? "guest" : "host";
+  }
 
-        const mv = pickBestMove(b, toMove, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
-        const t1 = performance.now();
+  // If a specific side was requested and it's not the current turn, switch turns.
+  if (sideToPlay !== toMove) {
+    console.log(`(switching turn to ${sideToPlay})`);
+    toMove = sideToPlay;
+  }
 
-        if (!mv) {
-          console.log("Engine: no move.");
-        } else {
-          printMove(mv);
-          try {
-            const nb = applyAnyMove(b, toMove, mv);
-            copyBoard(b, nb);
-            toMove = toMove === "host" ? "guest" : "host";
-          } catch (e: any) {
-            console.log(`Apply failed: ${e?.message ?? e}. Skipping.`);
-          }
-        }
-        console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
-        console.log(boardWithSidebar(b));
-        continue;
-      }
+  const t0 = performance.now();
+
+  // Opening auto-plant if the board is empty
+  if (isEmptyBoard(b)) {
+    const t = enginePickOpeningType(toMove);
+    if (t) {
+      plantOpening(b, toMove, t);
+      const t1 = performance.now();
+      const g = gateFor(toMove);
+      console.log(`Engine → PLANT ${TypeId[t]} at gate (${g.x},${g.y}) (mirrored)`);
+      // Rule: if guest planted, guest keeps the move; if host planted, hand to guest
+      if (toMove === "host") toMove = "guest";
+      console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
+      console.log(boardWithSidebar(b));
+      continue;
+    }
+  }
+
+  // Normal search
+  const mv = pickBestMove(b, toMove, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
+  const t1 = performance.now();
+
+  if (!mv) {
+    console.log("Engine: no move.");
+  } else {
+    printMove(mv);
+    try {
+      const nb = applyAnyMove(b, toMove, mv);
+      copyBoard(b, nb);
+      toMove = toMove === "host" ? "guest" : "host";
+    } catch (e: any) {
+      console.log(`Apply failed: ${e?.message ?? e}. Skipping.`);
+    }
+  }
+  console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
+  console.log(boardWithSidebar(b));
+  continue;
+}
 
       // Normal moves
       if (line.toLowerCase().startsWith("arr ")) {
