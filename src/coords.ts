@@ -104,3 +104,43 @@ export function coordsOf(index: number): XY {
 export function generateValidPoints(): XY[] {
   return XY_BY_INDEX.slice(); // shallow copy so callers can't mutate our table
 }
+// ---- Precomputed neighbor tables (1-based indices) ----
+// Each array index is a 1-based board index (1..NUM_SQUARES).
+// Values are arrays of 1-based neighbor indices.
+
+export const NEIGHBORS4_1: number[][] = (() => {
+  const out: number[][] = Array.from({ length: NUM_SQUARES + 1 }, () => []);
+  for (let i1 = 1; i1 <= NUM_SQUARES; i1++) {
+    const { x, y } = coordsOf(i1 - 1);
+    const cands = [
+      { x: x + 1, y },
+      { x: x - 1, y },
+      { x, y: y + 1 },
+      { x, y: y - 1 },
+    ];
+    const row: number[] = [];
+    for (const c of cands) {
+      const i0 = indexOf(c.x, c.y);
+      if (i0 !== -1) row.push(i0 + 1);
+    }
+    out[i1] = row;
+  }
+  return out;
+})();
+
+export const NEIGHBORS8_1: number[][] = (() => {
+  const out: number[][] = Array.from({ length: NUM_SQUARES + 1 }, () => []);
+  for (let i1 = 1; i1 <= NUM_SQUARES; i1++) {
+    const { x, y } = coordsOf(i1 - 1);
+    const row: number[] = [];
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        if (dx === 0 && dy === 0) continue;
+        const i0 = indexOf(x + dx, y + dy);
+        if (i0 !== -1) row.push(i0 + 1);
+      }
+    }
+    out[i1] = row;
+  }
+  return out;
+})();
