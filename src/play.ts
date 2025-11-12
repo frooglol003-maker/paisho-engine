@@ -6,7 +6,6 @@ import { Board, TypeId, Owner, packPiece, unpackPiece } from "./board";
 import { coordsOf, indexOf } from "./coords";
 import { pickBestMove, applyPlannedArrange } from "./engine";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
-import { getGardenType } from "./rules";
 
 // ---------- CLI ----------
 const args = Object.fromEntries(
@@ -59,7 +58,7 @@ const PIECE_KEYS: [TypeId, string][] = [
 ];
 
 // Standard starting pool for BOTH players:
-// R/W 3–5: 3 each; Lotus: 1; Orchid: 1; Accents: 1 each (Rock, Wheel, Boat, Knotweed)
+// R/W 3–5: 3 each; Lotus: 1; Orchid: 1; Accents: 1 each
 const STANDARD_POOL: CountMap = {
   R3: 3, R4: 3, R5: 3,
   W3: 3, W4: 3, W5: 3,
@@ -129,8 +128,6 @@ function toOwner(s: string): Owner {
 // ---------- Opening: gates & plant logic ----------
 const NORTH_GATE = { x: 0, y: +BOARD_RADIUS };
 const SOUTH_GATE = { x: 0, y: -BOARD_RADIUS };
-const EAST_GATE  = { x: +BOARD_RADIUS, y: 0 };
-const WEST_GATE  = { x: -BOARD_RADIUS, y: 0 };
 
 function gateFor(side: Side): { x: number; y: number } {
   // By your rule: guest plants in SOUTH, host mirrors in NORTH.
@@ -188,13 +185,20 @@ const DIM = ESC("2");
 const FG = (n: number) => ESC(`38;5;${n}`);
 const BG = (n: number) => ESC(`48;5;${n}`);
 
-// --- palette (keep the rest as-is) ---
+// Piece/label colors
+const FG_HOST  = FG(39);   // blue-ish
+const FG_GUEST = FG(213);  // magenta-ish
+
+// Board palette
 const BG_NEUTRAL = BG(137); // brown
 const BG_RED     = BG(166); // red
 const BG_WHITE   = BG(230); // white wood
-const BG_GATE    = BG(34);  // green (tweak to taste)
+const BG_GATE    = BG(34);  // green gate highlight
 
-// gate checker (unchanged)
+// Faint grid dot (foreground)
+const GRID_DOT = FG(240);
+
+// Gate checker (singular intersections)
 function isGatePoint(x: number, y: number): boolean {
   return (x === -8 && y === 0) ||
          (x ===  8 && y === 0) ||
@@ -204,27 +208,25 @@ function isGatePoint(x: number, y: number): boolean {
 
 // FINAL coloring formula
 function cellBg(x: number, y: number): string {
-  // 1) midlines are brown
-  if (x === 0 || y === 0) {
-    // ...but we’ll override gates below
-    return isGatePoint(x, y) ? BG_GATE : BG_NEUTRAL;
-  }
+  // 0) special gates
+  if (isGatePoint(x, y)) return BG_GATE;
 
-  // 2) inner diamond
+  // 1) midlines are brown
+  if (x === 0 || y === 0) return BG_NEUTRAL;
+
+  // 2) inner diamond by quadrants
   const manhattan = Math.abs(x) + Math.abs(y);
   if (manhattan < 7) {
     const q1 = x > 0 && y > 0;
-    const q2 = x < 0 && y > 0;
     const q3 = x < 0 && y < 0;
-    // const q4 = x > 0 && y < 0; // implicit else
-
-    if (q1 || q3) return BG_RED;    // quadrants 1 & 3
-    else return BG_WHITE;           // quadrants 2 & 4
+    return (q1 || q3) ? BG_RED : BG_WHITE; // Q1 & Q3 = red; Q2 & Q4 = white
   }
 
-  // 3) all other cells are brown
+  // 3) outer ring is brown
   return BG_NEUTRAL;
 }
+
+// Compact 2-char symbols (fixed width)
 function symOf(type: TypeId): string {
   switch (type) {
     case TypeId.R3: return "R3";
@@ -253,6 +255,7 @@ function safeXY(idx1Val: number): string {
     return "<?>"; 
   }
 }
+
 function countsToLines(label: string, m: CountMap, color: string): string[] {
   const rows: string[] = [];
   rows.push(`${BOLD}${color}${label}${RESET}`);
@@ -292,31 +295,27 @@ function boardWithSidebar(board: Board): string {
     const cells: string[] = [];
 
     for (let c = 0; c < w; c++) {
-  const idx = base + c;
-  const p = board.getAtIndex(idx);
+      const idx = base + c;
+      const p = board.getAtIndex(idx);
 
-  // OLD (unsafe):
-  // const { x, y } = coordsOf(idx - 1);
+      const xy = coordsOf(idx - 1) as { x: number; y: number } | undefined;
+      if (!xy) {
+        cells.push(`${BG_NEUTRAL}${DIM}· ${RESET}`);
+        continue;
+      }
+      const { x, y } = xy;
 
-  // NEW (safe):
-  const xy = coordsOf(idx - 1) as { x: number; y: number } | undefined;
-  if (!xy) {
-    // If the coords table doesn’t have this index, render a neutral cell and continue
-    cells.push(`${BG_NEUTRAL}${DIM}· ${RESET}`);
-    continue;
-  }
-  const { x, y } = xy;
+      const bg = cellBg(x, y);
+      if (!p) {
+        cells.push(`${bg}${GRID_DOT}· ${RESET}`);
+      } else {
+        const d = unpackPiece(p)!;
+        const fg = d.owner === Owner.Host ? FG_HOST : FG_GUEST;
+        const sym = symOf(d.type);
+        cells.push(`${bg}${fg}${BOLD}${sym}${RESET}`);
+      }
+    }
 
-  const bg = cellBg(x, y);
-  if (!p) {
-    cells.push(`${bg}${BG_GRIDDOT}· ${RESET}`);
-  } else {
-    const d = unpackPiece(p)!;
-    const fg = d.owner === Owner.Host ? FG_HOST : FG_GUEST;
-    const sym = symOf(d.type);
-    cells.push(`${bg}${fg}${BOLD}${sym}${RESET}`);
-  }
-}
     const boardLine = padLeft + cells.join("") + padLeft;
     const sideLine = sidebar[sideIdx] ?? "";
     lines.push(boardLine + sidebarPad + sideLine);
@@ -351,8 +350,8 @@ function applyAnyMove(board: Board, side: Side, m: any): Board {
     case "wheel":       return applyWheel(board, side, m.center);
     case "boatFlower":  return applyBoatFlower(board, side, m.boat, m.from, m.to);
     case "boatAccent":  return applyBoatAccent(board, side, m.boat, m.target);
-    default: throw new Error(`unknown move kind: ${m.kind}`);
   }
+  throw new Error(`unknown move kind: ${m?.kind}`);
 }
 
 function copyBoard(dst: Board, src: Board) {
@@ -365,16 +364,16 @@ function copyBoard(dst: Board, src: Board) {
 function help() {
   console.log(`
 Commands:
-  plant TYPE                   opening plant at your gate; mirrors opponent at opposite gate
-                               TYPE: R3 R4 R5 W3 W4 W5 Lotus Orchid (accents rarely planted)
+  plant TYPE                    opening plant at your gate; mirrors opponent at opposite gate
+                                TYPE: R3 R4 R5 W3 W4 W5 Lotus Orchid
   engine [host|guest|me|other]  let engine move/plant (optionally pick side)
-  arr x,y -> a,b; c,d; ...     arrange move with path
-  wheel x,y                    rotate neighbors around wheel at x,y
+  arr x,y -> a,b; c,d; ...      arrange move with path
+  wheel x,y                     rotate neighbors around wheel at x,y
   boatf boatX,boatY fromX,fromY -> toX,toY
   boata boatX,boatY targetX,targetY
-  place TYPE OWNER x,y         force-place a tile (debug)
-  print                        redraw the board
-  help                         show this help
+  place TYPE OWNER x,y [next]   force-place a tile (debug); add 'next' to hand turn
+  print                         redraw the board
+  help                          show this help
   quit
 `);
 }
@@ -394,12 +393,7 @@ async function main() {
     if (t) plantOpening(b, toMove, t);
     console.log(boardWithSidebar(b));
     // Guest moves again after mirrored plant
-    if (toMove === "guest") {
-      // guest keeps the move
-    } else {
-      // host planted first (if configured), then guest to move
-      toMove = "guest";
-    }
+    if (toMove !== "guest") toMove = "guest";
   }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
@@ -416,77 +410,69 @@ async function main() {
       // Opening: plant command
       if (line.toLowerCase().startsWith("plant ")) {
         const typ = toTypeId(line.slice(6).trim());
-        if (!isEmptyBoard(b) && (b.getAtIndex(idx1(gateFor(toMove).x, gateFor(toMove).y)) || b.getAtIndex(idx1(mirrorGateFor(toMove).x, mirrorGateFor(toMove).y)))) {
+        const myGate = gateFor(toMove), mirrorGate = mirrorGateFor(toMove);
+        if (!isEmptyBoard(b) && (b.getAtIndex(idx1(myGate.x, myGate.y)) || b.getAtIndex(idx1(mirrorGate.x, mirrorGate.y)))) {
           console.log("Planting phase seems over; use moves instead.");
         } else {
           plantOpening(b, toMove, typ);
           console.log(boardWithSidebar(b));
-          // By rule: guest moves again after mirrored plant
-          if (toMove === "host") toMove = "guest"; // if host planted first (rare)
-          // else guest retains move; do nothing
+          // By rule: if host planted first (rare), hand turn to guest; guest otherwise keeps it
+          if (toMove === "host") toMove = "guest";
         }
         continue;
       }
 
-     // Engine action (plant if opening, else search)
-// Usage: "engine", "engine host", "engine guest", "engine me", "engine other"
-const engMatch = line.toLowerCase().match(/^engine(?:\s+(host|guest|me|other))?$/);
-if (engMatch) {
-  const want = engMatch[1]; // may be undefined
-  let sideToPlay: Side = toMove;
+      // Engine action (plant if opening, else search)
+      // Usage: engine [host|guest|me|other]
+      const engMatch = line.toLowerCase().match(/^engine(?:\s+(host|guest|me|other))?$/);
+      if (engMatch) {
+        const want = engMatch[1];
+        let sideToPlay: Side = toMove;
 
-  if (want === "host" || want === "guest") {
-    sideToPlay = want as Side;
-  } else if (want === "me") {
-    sideToPlay = HUMAN;
-  } else if (want === "other") {
-    sideToPlay = HUMAN === "host" ? "guest" : "host";
-  }
+        if (want === "host" || want === "guest") sideToPlay = want as Side;
+        else if (want === "me") sideToPlay = HUMAN;
+        else if (want === "other") sideToPlay = HUMAN === "host" ? "guest" : "host";
 
-  // If a specific side was requested and it's not the current turn, switch turns.
-  if (sideToPlay !== toMove) {
-    console.log(`(switching turn to ${sideToPlay})`);
-    toMove = sideToPlay;
-  }
+        if (sideToPlay !== toMove) {
+          console.log(`(switching turn to ${sideToPlay})`);
+          toMove = sideToPlay;
+        }
 
-  const t0 = performance.now();
+        const t0 = performance.now();
 
-  // Opening auto-plant if the board is empty
-  if (isEmptyBoard(b)) {
-    const t = enginePickOpeningType(toMove);
-    if (t) {
-      plantOpening(b, toMove, t);
-      const t1 = performance.now();
-      const g = gateFor(toMove);
-      console.log(`Engine → PLANT ${TypeId[t]} at gate (${g.x},${g.y}) (mirrored)`);
-      // Rule: if guest planted, guest keeps the move; if host planted, hand to guest
-      if (toMove === "host") toMove = "guest";
-      console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
-      console.log(boardWithSidebar(b));
-      continue;
-    }
-  }
+        if (isEmptyBoard(b)) {
+          const t = enginePickOpeningType(toMove);
+          if (t) {
+            plantOpening(b, toMove, t);
+            const t1 = performance.now();
+            const g = gateFor(toMove);
+            console.log(`Engine → PLANT ${TypeId[t]} at gate (${g.x},${g.y}) (mirrored)`);
+            if (toMove === "host") toMove = "guest";
+            console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
+            console.log(boardWithSidebar(b));
+            continue;
+          }
+        }
 
-  // Normal search
-  const mv = pickBestMove(b, toMove, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
-  const t1 = performance.now();
+        const mv = pickBestMove(b, toMove, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
+        const t1 = performance.now();
 
-  if (!mv) {
-    console.log("Engine: no move.");
-  } else {
-    printMove(mv);
-    try {
-      const nb = applyAnyMove(b, toMove, mv);
-      copyBoard(b, nb);
-      toMove = toMove === "host" ? "guest" : "host";
-    } catch (e: any) {
-      console.log(`Apply failed: ${e?.message ?? e}. Skipping.`);
-    }
-  }
-  console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
-  console.log(boardWithSidebar(b));
-  continue;
-}
+        if (!mv) {
+          console.log("Engine: no move.");
+        } else {
+          printMove(mv);
+          try {
+            const nb = applyAnyMove(b, toMove, mv);
+            copyBoard(b, nb);
+            toMove = toMove === "host" ? "guest" : "host";
+          } catch (e: any) {
+            console.log(`Apply failed: ${e?.message ?? e}. Skipping.`);
+          }
+        }
+        console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
+        console.log(boardWithSidebar(b));
+        continue;
+      }
 
       // Normal moves
       if (line.toLowerCase().startsWith("arr ")) {
@@ -554,27 +540,23 @@ if (engMatch) {
       }
 
       if (line.toLowerCase().startsWith("place ")) {
-  // place TYPE OWNER x,y [next]
-  // e.g. place R3 host 0,0 next   → also hands turn to the other side
-  const parts = line.trim().split(/\s+/);
-  if (parts.length < 4 || parts.length > 5) throw new Error("Use: place TYPE OWNER x,y [next]");
-  const type = toTypeId(parts[1]);
-  const owner = toOwner(parts[2]);
-  const { x, y } = xyFromString(parts[3]);
-  const advance = (parts[4]?.toLowerCase() === "next");
+        // place TYPE OWNER x,y [next]
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 4 || parts.length > 5) throw new Error("Use: place TYPE OWNER x,y [next]");
+        const type = toTypeId(parts[1]);
+        const owner = toOwner(parts[2]);
+        const { x, y } = xyFromString(parts[3]);
+        const advance = (parts[4]?.toLowerCase() === "next");
 
-  b.setAtIndex(idx1(x, y), packPiece(type, owner));
-  console.log(boardWithSidebar(b));
+        b.setAtIndex(idx1(x, y), packPiece(type, owner));
+        console.log(boardWithSidebar(b));
 
-  // If you placed for the current side, we usually want to pass the move.
-  // Also allow explicit 'next' to force passing the move.
-  const ownerSide: Side = owner === Owner.Host ? "host" : "guest";
-  if (advance || ownerSide === toMove) {
-    toMove = toMove === "host" ? "guest" : "host";
-  }
-  continue;
-}
-
+        const ownerSide: Side = owner === Owner.Host ? "host" : "guest";
+        if (advance || ownerSide === toMove) {
+          toMove = toMove === "host" ? "guest" : "host";
+        }
+        continue;
+      }
 
       console.log("Unknown command. Type 'help'.");
     } catch (e: any) {
@@ -585,4 +567,5 @@ if (engMatch) {
   rl.close();
   console.log("Bye!");
 }
+
 main().catch(e => { console.error(e); process.exit(1); });
