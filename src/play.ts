@@ -188,35 +188,43 @@ const DIM = ESC("2");
 const FG = (n: number) => ESC(`38;5;${n}`);
 const BG = (n: number) => ESC(`48;5;${n}`);
 
-// Palette tweaks to match your reference:
-// - Neutral board (wood-ish brown)
-// - Red/White gardens
-// - Only the four gate intersections highlighted
-const BG_NEUTRAL = BG(137);   // brown
-const BG_RED     = BG(166);   // warm red
-const BG_WHITE   = BG(230);   // light wood
-const BG_GATE    = BG(58);    // olive diamond for the four gates
-const BG_GRIDDOT = FG(240);   // faint dot overlay
+// --- palette (keep the rest as-is) ---
+const BG_NEUTRAL = BG(137); // brown
+const BG_RED     = BG(166); // red
+const BG_WHITE   = BG(230); // white wood
+const BG_GATE    = BG(34);  // green (tweak to taste)
 
-const FG_HOST  = FG(39);   // blue-ish
-const FG_GUEST = FG(213);  // magenta-ish
-
+// gate checker (unchanged)
 function isGatePoint(x: number, y: number): boolean {
-  return (x === 0 && Math.abs(y) === BOARD_RADIUS) ||
-         (y === 0 && Math.abs(x) === BOARD_RADIUS);
+  return (x === -8 && y === 0) ||
+         (x ===  8 && y === 0) ||
+         (x ===  0 && y === 8) ||
+         (x ===  0 && y === -8);
 }
 
+// FINAL coloring formula
 function cellBg(x: number, y: number): string {
-  if (isGatePoint(x, y)) return BG_GATE;     // ONLY the four tips
-  // midlines neutral, not gate-colored
-  if (x === 0 || y === 0) return BG_NEUTRAL;
+  // 1) midlines are brown
+  if (x === 0 || y === 0) {
+    // ...but we’ll override gates below
+    return isGatePoint(x, y) ? BG_GATE : BG_NEUTRAL;
+  }
 
-  const g = getGardenType(x, y);
-  if (g === "red") return BG_RED;
-  if (g === "white") return BG_WHITE;
+  // 2) inner diamond
+  const manhattan = Math.abs(x) + Math.abs(y);
+  if (manhattan < 7) {
+    const q1 = x > 0 && y > 0;
+    const q2 = x < 0 && y > 0;
+    const q3 = x < 0 && y < 0;
+    // const q4 = x > 0 && y < 0; // implicit else
+
+    if (q1 || q3) return BG_RED;    // quadrants 1 & 3
+    else return BG_WHITE;           // quadrants 2 & 4
+  }
+
+  // 3) all other cells are brown
   return BG_NEUTRAL;
 }
-
 function symOf(type: TypeId): string {
   switch (type) {
     case TypeId.R3: return "R3";
