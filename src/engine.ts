@@ -1,16 +1,14 @@
 // src/engine.ts
 // Multi-step Arrange move gen + fast alpha–beta search + Harmony Bonus generators.
-// Board indices are 1-based (1..249). coords/index helpers are 0-based (0..248).
 
 import { performance } from "perf_hooks";
-import { coordsOf, indexOf } from "./coords";
+import { coordsOf, indexOf, NEIGHBORS4_1, NEIGHBORS8_1 } from "./coords";
 import { Board, unpackPiece, TypeId, Owner } from "./board";
 import { getPieceDescriptor, planWheelRotate, planBoatOnFlower, planBoatOnAccent } from "./rules";
 import { validateArrange } from "./move";
 import { evaluate } from "./eval";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
 import { Z_PIECE, Z_SIDE, xor64, key64 } from "./zobrist";
-import { coordsOf, indexOf, NEIGHBORS4_1, NEIGHBORS8_1 } from "./coords";
 
 // ---------- Types ----------
 export type Side = "host" | "guest";
