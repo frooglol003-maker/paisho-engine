@@ -70,6 +70,21 @@ export function harmoniousPair(
   const d = Math.abs(ai - bi);
   return d === 1 || d === HARMONY_CYCLE.length - 1;
 }
+// One-call harmony helper: pair check + Rock/Knotweed cancellation.
+export function isHarmonyActivePair(
+  board: Board,
+  aIdx1: number,
+  bIdx1: number,
+  aGarden: "R" | "W",
+  aNum: 3 | 4 | 5,
+  bGarden: "R" | "W",
+  bNum: 3 | 4 | 5
+): boolean {
+  if (!harmoniousPair(aGarden, aNum, bGarden, bNum)) return false;
+  // This uses the accent logic already in rules.ts
+  if (harmonyCancelledByAccents(board, aIdx1, bIdx1)) return false;
+  return true;
+}
 
 export function isClashPair(
   aGarden: "R" | "W",
