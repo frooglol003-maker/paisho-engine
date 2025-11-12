@@ -1,19 +1,27 @@
 // src/engine.ts
-// Multi-step Arrange move gen using validateArrange + tiny negamax.
+// Multi-step Arrange move gen + tiny negamax search + Harmony Bonus generators.
+// NOTE: Board indices are 1-based (1..249). coords/index helpers are 0-based (0..248).
 
 import { coordsOf, indexOf } from "./coords";
 import { Board, unpackPiece, TypeId } from "./board";
-import { getPieceDescriptor } from "./rules";
-import { validateArrange, buildHarmonyGraph } from "./move";
+import { getPieceDescriptor, planWheelRotate, planBoatOnFlower, planBoatOnAccent } from "./rules";
+import { validateArrange } from "./move";
 import { evaluate } from "./eval";
 
 // ---------- Types ----------
 export type Side = "host" | "guest";
-// A planned Arrange move is a path of 1-based indices (final square is path[path.length-1])
+// Arrange move: a path of 1-based indices from a source
 export type PlannedArrange = { from: number; path: number[] };
+
+// (Internal types only — do NOT export to avoid name clashes with rules.ts)
+type _IndexMove = { from: number; to: number };
+type _WheelPlan = { center: number; moves: _IndexMove[] };
+type _BoatFlowerPlan = { boat: number; from: number; to: number };
+type _BoatAccentPlan = { boat: number; remove: number[] };
 
 // ---------- Helpers ----------
 function opposite(s: Side): Side { return s === "host" ? "guest" : "host"; }
+
 function belongsTo(packed: number | null, side: Side): boolean {
   if (!packed) return false;
   const dec = unpackPiece(packed)!;
@@ -30,6 +38,31 @@ function* orthoNeighbors1(idx1: number): Iterable<number> {
   }
 }
 
+function owns(board: Board, idx1: number, side: Side): boolean {
+  const p = board.getAtIndex(idx1);
+  if (!p) return false;
+  const d = unpackPiece(p)!;
+  return side === "host" ? d.owner === 0 : d.owner === 1;
+}
+
+function isType(board: Board, idx1: number, t: TypeId): boolean {
+  const p = board.getAtIndex(idx1);
+  if (!p) return false;
+  const d = unpackPiece(p)!;
+  return d.type === t;
+}
+
+function* neighbors8(idx1: number): Iterable<number> {
+  const { x, y } = coordsOf(idx1 - 1);
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      if (dx === 0 && dy === 0) continue;
+      const t0 = indexOf(x + dx, y + dy);
+      if (t0 !== -1) yield t0 + 1;
+    }
+  }
+}
+
 // ---------- Move gen (multi-step Arrange via DFS bounded by tile limit) ----------
 export function generateLegalArrangeMoves(board: Board, side: Side): PlannedArrange[] {
   const out: PlannedArrange[] = [];
@@ -42,31 +75,27 @@ export function generateLegalArrangeMoves(board: Board, side: Side): PlannedArra
     const desc = getPieceDescriptor(board, i);
     if (desc.kind !== "basic" && desc.kind !== "lotus" && desc.kind !== "orchid") continue;
 
-    // movement limit by piece
     const limit =
       desc.kind === "basic" ? desc.number :
       desc.kind === "lotus" ? 2 :
       desc.kind === "orchid" ? 6 : 0;
     if (limit <= 0) continue;
 
-    // DFS over orthogonal steps up to limit, with no revisits
     const seen = new Set<number>([i]);
     function dfs(path: number[]) {
       if (path.length > limit) return;
-      // validate the whole path as an Arrange move
-      const valid = validateArrange(board, i, path);
-      if (valid.ok && path.length > 0) out.push({ from: i, path: path.slice() });
+
+      // validate full path as an Arrange move
+      if (path.length > 0) {
+        const valid = validateArrange(board, i, path);
+        if (valid.ok) out.push({ from: i, path: path.slice() });
+      }
 
       if (path.length === limit) return;
 
       const last = path.length ? path[path.length - 1] : i;
       for (const nxt of orthoNeighbors1(last)) {
         if (seen.has(nxt)) continue;
-        // We allow stepping through empties only; validateArrange will catch blocks,
-        // but pruning here reduces branching if the square is currently occupied and not final.
-        const occ = board.getAtIndex(nxt);
-        // You *can* capture on final, but not pass through a piece:
-        // So we still explore; validateArrange will reject if it's intermediate.
         seen.add(nxt);
         path.push(nxt);
         dfs(path);
@@ -82,7 +111,6 @@ export function generateLegalArrangeMoves(board: Board, side: Side): PlannedArra
 
 // ---------- Apply (returns cloned board) ----------
 export function applyPlannedArrange(board: Board, mv: PlannedArrange): Board {
-  // assume caller already validated; use final square only
   const final1 = mv.path[mv.path.length - 1];
   const cloned = board.clone();
   const piece = cloned.getAtIndex(mv.from);
@@ -125,87 +153,37 @@ function negamax(board: Board, side: Side, depth: number, alpha: number, beta: n
   let value = -Infinity;
   for (const mv of moves) {
     const child = applyPlannedArrange(board, mv);
-    const v = -negamax(child, side === "host" ? "guest" : "host", depth - 1, -beta, -alpha);
+    const v = -negamax(child, opposite(side), depth - 1, -beta, -alpha);
     if (v > value) value = v;
     if (value > alpha) alpha = value;
     if (alpha >= beta) break;
   }
   return value;
 }
+
 // ---------------- Harmony Bonus move generation (append-only) ----------------
+// These are exposed as functions but keep their plan types internal to avoid export name clashes.
 
-import {
-  planWheelRotate,
-  planBoatOnFlower,
-  planBoatOnAccent,
-  isGateCoord,
-  getPieceDescriptor,
-} from "./rules";
-import { coordsOf } from "./coords";
-import { TypeId, unpackPiece } from "./board";
-
-// Types for bonus plans (no board mutation here)
-export type IndexMove = { from: number; to: number };
-export type WheelPlan = { center: number; moves: IndexMove[] }; // rotate 8 neighbors
-export type BoatFlowerPlan = { boat: number; from: number; to: number }; // move a flower 1 step
-export type BoatAccentPlan = { boat: number; remove: number[] }; // remove boat + target accent
-
-function owns(board: Board, idx1: number, side: Side): boolean {
-  const p = board.getAtIndex(idx1);
-  if (!p) return false;
-  const d = unpackPiece(p)!;
-  return side === "host" ? d.owner === 0 : d.owner === 1;
-}
-
-function isType(board: Board, idx1: number, t: TypeId): boolean {
-  const p = board.getAtIndex(idx1);
-  if (!p) return false;
-  const d = unpackPiece(p)!;
-  return d.type === t;
-}
-
-function* neighbors8(idx1: number): Iterable<number> {
-  const { x, y } = coordsOf(idx1 - 1);
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dy = -1; dy <= 1; dy++) {
-      if (dx === 0 && dy === 0) continue;
-      const tx = x + dx, ty = y + dy;
-      const t0 = indexOf(tx, ty);
-      if (t0 !== -1) yield t0 + 1;
-    }
-  }
-}
-
-/**
- * Generate all valid Wheel rotations for `side`.
- * NOTE: Real rules only allow bonus after making a harmony; this function just lists what
- * would be legal *if* a Wheel bonus is available.
- */
-export function generateWheelBonusMoves(board: Board, side: Side): WheelPlan[] {
-  const out: WheelPlan[] = [];
+export function generateWheelBonusMoves(board: Board, side: Side): _WheelPlan[] {
+  const out: _WheelPlan[] = [];
   const N = (board as any).size1Based ?? 249;
   for (let i = 1; i <= N; i++) {
     if (!owns(board, i, side)) continue;
     if (!isType(board, i, TypeId.Wheel)) continue;
     const plan = planWheelRotate(board, i);
-    if (plan.ok) out.push({ center: i, moves: plan.moves });
+    if (plan.ok) out.push({ center: i, moves: plan.moves as _IndexMove[] });
   }
   return out;
 }
 
-/**
- * Generate all valid Boat-on-flower bonus moves for `side`.
- * Moves a BLOOMING flower by 1 (8-neighborhood), cannot land in gates or on occupied squares.
- */
-export function generateBoatFlowerBonusMoves(board: Board, side: Side): BoatFlowerPlan[] {
-  const out: BoatFlowerPlan[] = [];
+export function generateBoatFlowerBonusMoves(board: Board, side: Side): _BoatFlowerPlan[] {
+  const out: _BoatFlowerPlan[] = [];
   const N = (board as any).size1Based ?? 249;
 
   for (let b = 1; b <= N; b++) {
     if (!owns(board, b, side)) continue;
     if (!isType(board, b, TypeId.Boat)) continue;
 
-    // A Boat can target a BLOOMING flower (any owner per standard rules for bonus).
     for (let f = 1; f <= N; f++) {
       const p = board.getAtIndex(f);
       if (!p) continue;
@@ -216,7 +194,6 @@ export function generateBoatFlowerBonusMoves(board: Board, side: Side): BoatFlow
         d.type === TypeId.Lotus || d.type === TypeId.Orchid;
       if (!isFlower) continue;
 
-      // Try each adjacent target for that flower
       for (const to of neighbors8(f)) {
         const plan = planBoatOnFlower(board, f, to);
         if (plan.ok) out.push({ boat: b, from: f, to });
@@ -226,19 +203,14 @@ export function generateBoatFlowerBonusMoves(board: Board, side: Side): BoatFlow
   return out;
 }
 
-/**
- * Generate all valid Boat-on-accent bonus actions for `side`.
- * Removes the targeted accent AND the boat itself.
- */
-export function generateBoatAccentBonusMoves(board: Board, side: Side): BoatAccentPlan[] {
-  const out: BoatAccentPlan[] = [];
+export function generateBoatAccentBonusMoves(board: Board, side: Side): _BoatAccentPlan[] {
+  const out: _BoatAccentPlan[] = [];
   const N = (board as any).size1Based ?? 249;
 
   for (let b = 1; b <= N; b++) {
     if (!owns(board, b, side)) continue;
     if (!isType(board, b, TypeId.Boat)) continue;
 
-    // Boat can target any adjacent non-boat accent
     for (const target of neighbors8(b)) {
       const p = board.getAtIndex(target);
       if (!p) continue;
@@ -247,7 +219,7 @@ export function generateBoatAccentBonusMoves(board: Board, side: Side): BoatAcce
         d.type === TypeId.Rock || d.type === TypeId.Wheel || d.type === TypeId.Boat || d.type === TypeId.Knotweed
       );
       if (!isAccent) continue;
-      if (d.type === TypeId.Boat) continue; // planner disallows boating a boat
+      if (d.type === TypeId.Boat) continue;
 
       const res = planBoatOnAccent(board, target, b);
       if (res.ok) out.push({ boat: b, remove: res.remove.map(r => r.remove) });
