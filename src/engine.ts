@@ -10,6 +10,7 @@ import { validateArrange } from "./move";
 import { evaluate } from "./eval";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
 import { Z_PIECE, Z_SIDE, xor64, key64 } from "./zobrist";
+import { coordsOf, indexOf, NEIGHBORS4_1, NEIGHBORS8_1 } from "./coords";
 
 // ---------- Types ----------
 export type Side = "host" | "guest";
@@ -32,16 +33,6 @@ function belongsTo(packed: number | null, side: Side): boolean {
   return side === "host" ? dec.owner === 0 : dec.owner === 1;
 }
 
-// Generate all simple orthogonal neighbors (1 step) as 1-based indices
-function* orthoNeighbors1(idx1: number): Iterable<number> {
-  const { x, y } = coordsOf(idx1 - 1);
-  const cands = [{ x: x + 1, y }, { x: x - 1, y }, { x, y: y + 1 }, { x, y: y - 1 }];
-  for (const c of cands) {
-    const t0 = indexOf(c.x, c.y);
-    if (t0 !== -1) yield t0 + 1;
-  }
-}
-
 function owns(board: Board, idx1: number, side: Side): boolean {
   const p = board.getAtIndex(idx1);
   if (!p) return false;
@@ -56,16 +47,6 @@ function isType(board: Board, idx1: number, t: TypeId): boolean {
   return d.type === t;
 }
 
-function* neighbors8(idx1: number): Iterable<number> {
-  const { x, y } = coordsOf(idx1 - 1);
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dy = -1; dy <= 1; dy++) {
-      if (dx === 0 && dy === 0) continue;
-      const t0 = indexOf(x + dx, y + dy);
-      if (t0 !== -1) yield t0 + 1;
-    }
-  }
-}
 
 // ---------- Search core (alpha–beta + ordering + TT + time limit) ----------
 type ArrangeMove = { kind: "arrange"; from: number; path: number[] };
@@ -378,7 +359,7 @@ export function generateLegalArrangeMoves(board: Board, side: Side): PlannedArra
       if (path.length === limit) return;
 
       const last = path.length ? path[path.length - 1] : i;
-      for (const nxt of orthoNeighbors1(last)) {
+      for (const nxt of NEIGHBORS4_1[last]) {
         if (seen.has(nxt)) continue;
         seen.add(nxt);
         path.push(nxt);
@@ -431,7 +412,7 @@ export function generateBoatFlowerBonusMoves(board: Board, side: Side): _BoatFlo
         d.type === TypeId.Lotus || d.type === TypeId.Orchid;
       if (!isFlower) continue;
 
-      for (const to of neighbors8(f)) {
+      for (const to of NEIGHBORS8_1[f]) {
         const plan = planBoatOnFlower(board, f, to);
         if (plan.ok) out.push({ boat: b, from: f, to });
       }
@@ -448,7 +429,7 @@ export function generateBoatAccentBonusMoves(board: Board, side: Side): _BoatAcc
     if (!owns(board, b, side)) continue;
     if (!isType(board, b, TypeId.Boat)) continue;
 
-    for (const target of neighbors8(b)) {
+    for (const target of NEIGHBORS8_1[b]) {
       const p = board.getAtIndex(target);
       if (!p) continue;
       const d = unpackPiece(p)!;
