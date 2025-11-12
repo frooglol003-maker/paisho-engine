@@ -1,7 +1,25 @@
 // src/demo.ts
 import { Board, TypeId, Owner, packPiece } from "./board";
-import { bestMove } from "./engine"; // If your function is named differently (e.g. findBestMove), adjust this import.
+import * as Engine from "./engine";
 import { coordsOf, indexOf } from "./coords";
+
+// Pick whichever best-move function your engine actually exports
+function pickBestMoveFn() {
+  const f =
+    (Engine as any).bestMove ||
+    (Engine as any).findBestMove ||
+    (Engine as any).searchBestMove ||
+    (Engine as any).getBestMove ||
+    (Engine as any).computeBestMove;
+  if (!f) {
+    const exported = Object.keys(Engine).sort().join(", ");
+    throw new Error(
+      `No best-move function found. Exports are: ${exported}. ` +
+      `Expected one of: bestMove, findBestMove, searchBestMove, getBestMove, computeBestMove.`
+    );
+  }
+  return f as (b: Board, pov: "host" | "guest", depth: number) => any;
+}
 
 function idx1(x: number, y: number): number {
   const i0 = indexOf(x, y);
@@ -18,7 +36,7 @@ function setupSmallPosition(): Board {
   // Guest W3 at (1,0) [neutral midline]
   b.setAtIndex(idx1(1, 0), packPiece(TypeId.W3, Owner.Guest));
 
-  // Add one more host piece to create options (R4 at (0,1) — neutral)
+  // Extra host piece to create options (R4 at (0,1))
   b.setAtIndex(idx1(0, 1), packPiece(TypeId.R4, Owner.Host));
 
   return b;
@@ -26,7 +44,6 @@ function setupSmallPosition(): Board {
 
 function printMove(m: any) {
   if (!m) { console.log("Engine returned no move."); return; }
-  // Expecting a shape like { kind: "arrange", from: number, path: number[] }
   if (m.kind === "arrange") {
     const fromXY = coordsOf(m.from - 1);
     const toXY = coordsOf(m.path[m.path.length - 1] - 1);
@@ -38,8 +55,9 @@ function printMove(m: any) {
 
 async function main() {
   const board = setupSmallPosition();
-  const depth = 3; // try 2–4 to start; higher is slower
-  const move = bestMove(board, "host", depth); // If your API expects (board, pov, depth)
+  const depth = 3; // try 2–4
+  const bestFn = pickBestMoveFn();
+  const move = bestFn(board, "host", depth);
   printMove(move);
 }
 
