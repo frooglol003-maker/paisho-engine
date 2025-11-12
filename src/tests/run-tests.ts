@@ -36,3 +36,12 @@ function run() {
 }
 
 run();
+import { Board } from "../board";
+import { pickBestMove } from "../engine";
+
+console.log("Test: engine can suggest a move (may be null on empty board)");
+const b = new Board();
+// If your Board starts empty, this will be null (that's ok).
+// Once you have a setup that places starting tiles, it should return a move.
+const mv = pickBestMove(b, "host", 2);
+console.log("Best move for host @ depth 2:", mv);
