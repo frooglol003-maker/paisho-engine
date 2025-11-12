@@ -220,15 +220,20 @@ const PIECE_KEYS: [TypeId, string][] = [
 
 // If you want “remaining”, define initial pools here (or set to null to hide).
 // These are just placeholders; edit to your real set when you know it.
-const POOL_DEFAULTS: null | {
-  host: CountMap; guest: CountMap;
-} = null; // set to null to show only “On board”. Provide numbers to enable “Remaining”.
+// Standard starting pool for BOTH players:
+// R/W 3–5: 3 each; Lotus: 1; Orchid: 1; Accents: 1 each (Rock, Wheel, Boat, Knotweed)
+const STANDARD_POOL: CountMap = {
+  R3: 3, R4: 3, R5: 3,
+  W3: 3, W4: 3, W5: 3,
+  Lotus: 1, Orchid: 1,
+  Rock: 1, Wheel: 1, Boat: 1, Knotweed: 1,
+};
 
-function zeroCounts(): CountMap {
-  const m: CountMap = {};
-  for (const [, key] of PIECE_KEYS) m[key] = 0;
-  return m;
-}
+// Enable “remaining” by providing a pool for each side
+const POOL_DEFAULTS: { host: CountMap; guest: CountMap } = {
+  host: { ...STANDARD_POOL },
+  guest: { ...STANDARD_POOL },
+};
 
 function countsOnBoard(board: Board): { host: CountMap; guest: CountMap } {
   const host = zeroCounts();
@@ -271,27 +276,18 @@ function boardWithSidebar(board: Board): string {
 
   // Build side panel content
   const onBoard = countsOnBoard(board);
-  const hostOn = countsToLines("HOST on board", FG_HOST, FG_HOST);
-  const guestOn = countsToLines("GUEST on board", FG_GUEST, FG_GUEST);
+  const hostOn = countsToLines("HOST on board", onBoard.host, FG_HOST);
+  const guestOn = countsToLines("GUEST on board", onBoard.guest, FG_GUEST);
 
   let hostRem: string[] = [];
   let guestRem: string[] = [];
   if (POOL_DEFAULTS) {
     const hostRemaining = minusCounts(POOL_DEFAULTS.host, onBoard.host);
     const guestRemaining = minusCounts(POOL_DEFAULTS.guest, onBoard.guest);
-    hostRem = countsToLines("HOST remaining", FG_HOST, FG_HOST).map((_, i) => {
-      const key = PIECE_KEYS[i]?.[1];
-      if (!key) return "";
-      const v = hostRemaining[key] ?? 0;
-      return v ? `${FG_HOST}${key.padEnd(8)} ${BOLD}${String(v).padStart(2)}${RESET}` : "";
-    }).filter(Boolean);
-    guestRem = countsToLines("GUEST remaining", FG_GUEST, FG_GUEST).map((_, i) => {
-      const key = PIECE_KEYS[i]?.[1];
-      if (!key) return "";
-      const v = guestRemaining[key] ?? 0;
-      return v ? `${FG_GUEST}${key.padEnd(8)} ${BOLD}${String(v).padStart(2)}${RESET}` : "";
-    }).filter(Boolean);
+    hostRem = countsToLines("HOST remaining", hostRemaining, FG_HOST);
+    guestRem = countsToLines("GUEST remaining", guestRemaining, FG_GUEST);
   }
+
 
   const sidebar: string[] = [];
   // Compose sidebar lines: titles + lists (trim to ~17–20 lines)
