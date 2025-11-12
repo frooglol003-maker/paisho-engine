@@ -160,12 +160,11 @@ function plantOpening(b: Board, who: Side, type: TypeId) {
   // place who at own gate
   b.setAtIndex(gi, packPiece(type, who === "host" ? Owner.Host : Owner.Guest));
   // mirror place opponent same type
-  const other = who === "host" ? Owner.Guest : Owner.Host;
-  b.setAtIndex(mi, packPiece(type, other));
+  const otherOwner = who === "host" ? Owner.Guest : Owner.Host;
+  b.setAtIndex(mi, packPiece(type, otherOwner));
 
-  // adjust pools (one for each side)
-  const key = PIECE_KEYS.find(([tid]) => tid === type)?.[1]!;
-  POOL[who].__proto__; // keep TS happy about existence
+  // adjust pools (one tile of that type from each side)
+  const key = PIECE_KEYS.find(([tid]) => tid === type)![1];
   POOL.host[key] = Math.max(0, (POOL.host[key] ?? 0) - 1);
   POOL.guest[key] = Math.max(0, (POOL.guest[key] ?? 0) - 1);
 }
@@ -351,7 +350,7 @@ function help() {
 Commands:
   plant TYPE                   opening plant at your gate; mirrors opponent at opposite gate
                                TYPE: R3 R4 R5 W3 W4 W5 Lotus Orchid (accents rarely planted)
-  engine                       let engine move/plant now
+  engine [host|guest|me|other]  let engine move/plant (optionally pick side)
   arr x,y -> a,b; c,d; ...     arrange move with path
   wheel x,y                    rotate neighbors around wheel at x,y
   boatf boatX,boatY fromX,fromY -> toX,toY
