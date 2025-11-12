@@ -36,7 +36,6 @@ function run() {
 }
 
 run();
-import { Board } from "../board";
 import { pickBestMove } from "../engine";
 
 console.log("Test: engine can suggest a move (may be null on empty board)");
