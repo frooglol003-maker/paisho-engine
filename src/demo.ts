@@ -1,178 +1,150 @@
 // src/demo.ts
-// Rich demo runner: board rendering, CLI flags, self-play and scenarios.
-
-import { Board, TypeId, Owner, packPiece, unpackPiece } from "./board";
-import { pickBestMove, applyPlannedArrange } from "./engine";
+import { performance } from "perf_hooks";
+import { Board, TypeId, Owner, packPiece } from "./board";
+import { pickBestMove } from "./engine";
 import { coordsOf, indexOf } from "./coords";
+import { applyPlannedArrange } from "./engine";
+import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
 
-// ---------------- CLI ----------------
+// --- CLI args ---
+const args = Object.fromEntries(
+  process.argv.slice(2).map(s => {
+    const m = s.match(/^--([^=]+)=(.*)$/);
+    if (m) return [m[1], m[2]];
+    return [s.replace(/^--/, ""), true];
+  })
+);
 
-type Side = "host" | "guest";
-type ScenarioName = "small" | "center" | "harmony-seed";
+const SIDE   = (args.side === "guest" ? "guest" : "host") as "host"|"guest";
+const DEPTH  = Math.max(1, parseInt(String(args.depth ?? "3"), 10));
+const TIMEMS = args.time ? Math.max(1, parseInt(String(args.time), 10)) : undefined;
+const SELFPLIES = Math.max(0, parseInt(String(args.selfplay ?? "0"), 10));
+const SCENARIO  = (args.scenario ?? "small") as "small" | "empty";
 
-function parseArgs(argv: string[]) {
-  const args: Record<string, string | boolean> = {};
-  for (let i = 2; i < argv.length; i++) {
-    const a = argv[i];
-    const [k, v] = a.startsWith("--") ? a.slice(2).split("=") : [a, "true"];
-    if (k) args[k] = v ?? "true";
-  }
-  const depth = Number(args.depth ?? 3);
-  const side = (args.side as Side) ?? "host";
-  const selfplay = Number(args.selfplay ?? 0); // 0 = single suggestion
-  const scenario = (args.scenario as ScenarioName) ?? "small";
-  return { depth, side, selfplay, scenario };
-}
-
-// ---------------- Utilities ----------------
-
+// --- Helpers ---
 function idx1(x: number, y: number): number {
   const i0 = indexOf(x, y);
   if (i0 === -1) throw new Error(`invalid XY (${x},${y})`);
   return i0 + 1;
 }
 
-function pieceGlyph(packed: number | null): string {
-  if (!packed) return "·"; // empty
-  const d = unpackPiece(packed)!;
-  // Base letter for type
-  let base =
-    d.type === TypeId.R3 ? "3" :
-    d.type === TypeId.R4 ? "4" :
-    d.type === TypeId.R5 ? "5" :
-    d.type === TypeId.W3 ? "3" :
-    d.type === TypeId.W4 ? "4" :
-    d.type === TypeId.W5 ? "5" :
-    d.type === TypeId.Lotus ? "L" :
-    d.type === TypeId.Orchid ? "O" :
-    d.type === TypeId.Rock ? "R" :
-    d.type === TypeId.Wheel ? "W" :
-    d.type === TypeId.Boat ? "B" :
-    d.type === TypeId.Knotweed ? "K" : "?";
-
-  // Garden tint for basics: prefix 'r'/'w' conceptually by casing:
-  // Host = UPPERCASE, Guest = lowercase
-  // For basics, we already show the number (3/4/5). Add a subtle garden hint via case of number proxy:
-  // We'll render basics as numbers but wrap with case via a small trick: keep as number, just case via owner.
-  // (Uppercase/lowercase has no effect on numbers, so add a tiny garden suffix.)
-  if (d.type === TypeId.R3 || d.type === TypeId.R4 || d.type === TypeId.R5) {
-    base = "R" + base; // R3/R4/R5
-  } else if (d.type === TypeId.W3 || d.type === TypeId.W4 || d.type === TypeId.W5) {
-    base = "W" + base; // W3/W4/W5
-  }
-
-  const owned = (d.owner === 0) ? base.toUpperCase() : base.toLowerCase();
-  return owned;
+function setupSmallPosition(): Board {
+  const b = new Board();
+  // Host R3 at (0,0)
+  b.setAtIndex(idx1(0, 0), packPiece(TypeId.R3, Owner.Host));
+  // Guest W3 at (1,0)
+  b.setAtIndex(idx1(1, 0), packPiece(TypeId.W3, Owner.Guest));
+  // Extra host R4 at (0,1)
+  b.setAtIndex(idx1(0, 1), packPiece(TypeId.R4, Owner.Host));
+  return b;
 }
 
-function renderBoard(b: Board): string {
-  // y from +8 down to -8; x from -8..+8, using indexOf to decide real intersections
-  let out = "";
-  for (let y = 8; y >= -8; y--) {
-    let row = "";
-    for (let x = -8; x <= 8; x++) {
-      const i0 = indexOf(x, y);
-      if (i0 === -1) {
-        row += "  "; // off-board pad
-      } else {
-        const i1 = i0 + 1;
-        const packed = b.getAtIndex(i1);
-        row += pieceGlyph(packed).padEnd(2, " ");
-      }
+function setupEmpty(): Board {
+  return new Board();
+}
+
+function boardToAscii(b: Board): string {
+  const lines: string[] = [];
+  const widths = [9,11,13,15, 17,17,17,17,17,17,17,17,17, 15,13,11,9];
+  let base = 1;
+  for (let r = 0; r < widths.length; r++) {
+    const w = widths[r];
+    const pad = " ".repeat((17 - w));
+    const cells: string[] = [];
+    for (let c = 0; c < w; c++) {
+      const idx = base + c;
+      const p = b.getAtIndex(idx);
+      if (!p) { cells.push("·"); continue; }
+      const { type, owner } = ((): {type: TypeId, owner: Owner} => {
+        const d = require("./board").unpackPiece(p)!;
+        return d;
+      })();
+      const ownerChar = owner === Owner.Host ? "" : ""; // you can mark guest with lower-case if you want
+      const sym =
+        type === TypeId.R3 ? "R3" :
+        type === TypeId.R4 ? "R4" :
+        type === TypeId.R5 ? "R5" :
+        type === TypeId.W3 ? "W3" :
+        type === TypeId.W4 ? "W4" :
+        type === TypeId.W5 ? "W5" :
+        type === TypeId.Lotus ? "L " :
+        type === TypeId.Orchid ? "O " :
+        type === TypeId.Rock ? "⛰ " :
+        type === TypeId.Wheel ? "⟳ " :
+        type === TypeId.Boat ? "⛵ " :
+        type === TypeId.Knotweed ? "✣ " : "??";
+      cells.push(sym.trim());
     }
-    out += row.replace(/\s+$/,"") + "\n";
+    lines.push(pad + cells.join(" ") + pad);
+    base += w;
   }
-  return out;
+  return lines.join("\n");
 }
 
 function printMove(m: any) {
   if (!m) { console.log("Engine returned no move."); return; }
   if (m.kind === "arrange") {
-    const to = m.path[m.path.length - 1];
     const fromXY = coordsOf(m.from - 1);
-    const toXY = coordsOf(to - 1);
+    const toXY = coordsOf(m.path[m.path.length - 1] - 1);
     console.log(
-      `→ ARRANGE from idx ${m.from} ${JSON.stringify(fromXY)} ` +
-      `to idx ${to} ${JSON.stringify(toXY)} (steps=${m.path.length})`
+      `→ ARRANGE from ${JSON.stringify(fromXY)} -> ${JSON.stringify(toXY)} (steps=${m.path.length})`
     );
+  } else if (m.kind === "wheel") {
+    const at = coordsOf(m.center - 1);
+    console.log(`→ WHEEL at ${JSON.stringify(at)}`);
+  } else if (m.kind === "boatFlower") {
+    const s = coordsOf(m.from - 1);
+    const t = coordsOf(m.to - 1);
+    console.log(`→ BOAT-FLOWER move ${JSON.stringify(s)} -> ${JSON.stringify(t)} (boat @ ${m.boat})`);
+  } else if (m.kind === "boatAccent") {
+    const t = coordsOf(m.target - 1);
+    console.log(`→ BOAT-ACCENT remove accent @ ${JSON.stringify(t)} with boat ${m.boat}`);
   } else {
-    console.log("→ Move:", m);
+    console.log("→", m);
   }
 }
 
-// ---------------- Scenarios ----------------
-
-function scenario_small(): Board {
-  const b = new Board();
-  // Host R3 at (0,0) [neutral midline]
-  b.setAtIndex(idx1(0, 0), packPiece(TypeId.R3, Owner.Host));
-  // Guest W3 at (1,0) [neutral midline]
-  b.setAtIndex(idx1(1, 0), packPiece(TypeId.W3, Owner.Guest));
-  // Extra host piece to create options (R4 at (0,1))
-  b.setAtIndex(idx1(0, 1), packPiece(TypeId.R4, Owner.Host));
-  return b;
-}
-
-function scenario_center(): Board {
-  const b = new Board();
-  // Place a few pieces around the center to exercise centerDiff
-  b.setAtIndex(idx1(0, 0), packPiece(TypeId.R3, Owner.Host));
-  b.setAtIndex(idx1(1, 1), packPiece(TypeId.W4, Owner.Guest));
-  b.setAtIndex(idx1(-1, 0), packPiece(TypeId.R5, Owner.Host));
-  b.setAtIndex(idx1(0, -1), packPiece(TypeId.W3, Owner.Guest));
-  return b;
-}
-
-function scenario_harmony_seed(): Board {
-  const b = new Board();
-  // Try to place compatible basics on the same axis with clear LoS to seed harmonyDegDiff
-  // Host: R3 at (-1,0), R4 at (1,0) — can align via midline if you move
-  b.setAtIndex(idx1(-1, 0), packPiece(TypeId.R3, Owner.Host));
-  b.setAtIndex(idx1(1, 0),  packPiece(TypeId.R4, Owner.Host));
-  // Guest blockers around
-  b.setAtIndex(idx1(0, 1),  packPiece(TypeId.W3, Owner.Guest));
-  b.setAtIndex(idx1(0, -1), packPiece(TypeId.W5, Owner.Guest));
-  return b;
-}
-
-function buildScenario(name: ScenarioName): Board {
-  switch (name) {
-    case "center": return scenario_center();
-    case "harmony-seed": return scenario_harmony_seed();
-    case "small":
-    default: return scenario_small();
+function applyAnyMove(board: Board, side: "host"|"guest", m: any): Board {
+  switch (m.kind) {
+    case "arrange":     return applyPlannedArrange(board, { from: m.from, path: m.path });
+    case "wheel":       return applyWheel(board, side, m.center);
+    case "boatFlower":  return applyBoatFlower(board, side, m.boat, m.from, m.to);
+    case "boatAccent":  return applyBoatAccent(board, side, m.boat, m.target);
+    default: throw new Error(`unknown move kind: ${m.kind}`);
   }
 }
 
-// ---------------- Main ----------------
-
+// --- Main ---
 async function main() {
-  const { depth, side, selfplay, scenario } = parseArgs(process.argv);
+  const board =
+    SCENARIO === "empty" ? setupEmpty()
+    : setupSmallPosition();
 
-  let board = buildScenario(scenario);
-  console.log(`Scenario: ${scenario} | Side: ${side} | Depth: ${depth} | Self-play plies: ${selfplay}`);
-  console.log(renderBoard(board));
+  console.log(`Scenario: ${SCENARIO} | Side: ${SIDE} | Depth: ${DEPTH} | Time: ${TIMEMS ?? "∞"}ms | Self-play plies: ${SELFPLIES}`);
+  console.log(boardToAscii(board));
+  console.log("");
 
-  if (selfplay > 0) {
-    let toMove: Side = side;
-    for (let ply = 1; ply <= selfplay; ply++) {
-      console.log(`\nPly ${ply}: ${toMove} to move`);
-      console.time("search");
-      const mv = pickBestMove(board, toMove, depth);
-      console.timeEnd("search");
-      printMove(mv);
-      if (!mv) { console.log("No legal move — stopping."); break; }
-      board = applyPlannedArrange(board, mv);
-      console.log(renderBoard(board));
-      toMove = (toMove === "host" ? "guest" : "host");
-    }
-  } else {
-    console.time("search");
-    const mv = pickBestMove(board, side, depth);
-    console.timeEnd("search");
-    printMove(mv);
+  // Search once
+  const t0 = performance.now();
+  const move = pickBestMove(board, SIDE, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
+  const t1 = performance.now();
+  printMove(move);
+  console.log(`search: ${(t1 - t0)/1000}s`);
+
+  // Optional selfplay (alternates sides)
+  let b = board;
+  let side: "host"|"guest" = SIDE;
+  for (let p = 0; p < SELFPLIES; p++) {
+    const mv = pickBestMove(b, side, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
+    if (!mv) break;
+    b = applyAnyMove(b, side, mv);
+    side = side === "host" ? "guest" : "host";
+  }
+
+  if (SELFPLIES > 0) {
+    console.log("\nFinal position after self-play:");
+    console.log(boardToAscii(b));
   }
 }
-main()
-  .then(() => process.exit(0))
-  .catch(e => { console.error(e); process.exit(1); });
+
+main().catch(e => { console.error(e); process.exit(1); });
