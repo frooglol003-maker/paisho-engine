@@ -4,11 +4,12 @@
 
 import { performance } from "perf_hooks";
 import { coordsOf, indexOf } from "./coords";
-import { Board, unpackPiece, TypeId } from "./board";
+import { Board, unpackPiece, TypeId, Owner } from "./board";
 import { getPieceDescriptor, planWheelRotate, planBoatOnFlower, planBoatOnAccent } from "./rules";
 import { validateArrange } from "./move";
 import { evaluate } from "./eval";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
+import { Z_PIECE, Z_SIDE, xor64, key64 } from "./zobrist";
 
 // ---------- Types ----------
 export type Side = "host" | "guest";
@@ -84,15 +85,42 @@ interface TTEntry {
 }
 
 const TT = new Map<string, TTEntry>();
+const TT_CAP = 200_000;
 
+function TT_set(key: string, val: TTEntry) {
+  if (TT.size >= TT_CAP) {
+    // simple aging: drop ~1/8 of entries
+    let n = Math.floor(TT_CAP / 8);
+    for (const k of TT.keys()) { TT.delete(k); if (--n <= 0) break; }
+  }
+  TT.set(key, val);
+}
+
+// Zobrist-based position key
 function boardKey(board: Board, side: Side): string {
   const N: number = (board as any).size1Based ?? 249;
-  let s = side === "host" ? "H|" : "G|";
+  let h: [number, number] = [0, 0];
   for (let i = 1; i <= N; i++) {
-    const v = board.getAtIndex(i) || 0;
-    s += v.toString(16) + ",";
+    const p = board.getAtIndex(i);
+    if (!p) continue;
+    // inline unpack for speed
+    const type = (p & 0x0f) as TypeId;
+    const owner = ((p >> 4) & 0x01) ? Owner.Guest : Owner.Host;
+
+    let tIdx = 0;
+    switch (type) {
+      case TypeId.R3: tIdx = 0; break; case TypeId.R4: tIdx = 1; break; case TypeId.R5: tIdx = 2; break;
+      case TypeId.W3: tIdx = 3; break; case TypeId.W4: tIdx = 4; break; case TypeId.W5: tIdx = 5; break;
+      case TypeId.Lotus: tIdx = 6; break; case TypeId.Orchid: tIdx = 7; break;
+      case TypeId.Rock: tIdx = 8; break; case TypeId.Wheel: tIdx = 9; break; case TypeId.Boat: tIdx = 10; break;
+      case TypeId.Knotweed: tIdx = 11; break;
+      default: continue; // Empty
+    }
+    const oIdx = owner === Owner.Host ? 0 : 1;
+    h = xor64(h, Z_PIECE[i][tIdx][oIdx]);
   }
-  return s;
+  if (side === "guest") h = xor64(h, Z_SIDE);
+  return key64(h);
 }
 
 // Forward-declared in this file; function declarations are hoisted.
@@ -118,16 +146,20 @@ function applyMoveCloned(board: Board, side: Side, mv: AnyMove): Board {
   }
 }
 
+// --- killer moves + history (declare AFTER AnyMove is defined) ---
+const MAX_PLY = 128;
+const killers: (AnyMove | null)[][] = Array.from({ length: MAX_PLY }, () => [null, null]);
+const history = new Map<string, number>();
+function histKey(mv: AnyMove) { return JSON.stringify(mv); }
+
 // Generate all candidate moves (arrange + bonus). Bonus are deduped and pre-checked.
 function generateAllMoves(board: Board, side: Side): AnyMove[] {
   const moves: AnyMove[] = [];
 
   // Arrange
-  try {
-    for (const m of generateLegalArrangeMoves(board, side)) {
-      moves.push({ kind: "arrange", from: m.from, path: m.path });
-    }
-  } catch {}
+  for (const m of generateLegalArrangeMoves(board, side)) {
+    moves.push({ kind: "arrange", from: m.from, path: m.path });
+  }
 
   // Bonus: Wheel / Boat (robust, deduped, prechecked)
   {
@@ -145,39 +177,32 @@ function generateAllMoves(board: Board, side: Side): AnyMove[] {
     };
 
     // Wheel
-    try {
-      for (const c of generateWheelBonusMoves(board, side)) {
-        if (typeof c.center === "number") {
-          safePush({ kind: "wheel", center: c.center });
-        }
+    for (const c of generateWheelBonusMoves(board, side)) {
+      if (typeof c.center === "number") {
+        safePush({ kind: "wheel", center: c.center });
       }
-    } catch { /* ignore */ }
-
+    }
     // Boat on flower
-    try {
-      for (const b of generateBoatFlowerBonusMoves(board, side)) {
-        if (typeof b.boat === "number" && typeof b.from === "number" && typeof b.to === "number" && b.from !== b.to) {
-          safePush({ kind: "boatFlower", boat: b.boat, from: b.from, to: b.to });
-        }
+    for (const b of generateBoatFlowerBonusMoves(board, side)) {
+      if (typeof b.boat === "number" && typeof b.from === "number" && typeof b.to === "number" && b.from !== b.to) {
+        safePush({ kind: "boatFlower", boat: b.boat, from: b.from, to: b.to });
       }
-    } catch { /* ignore */ }
-
+    }
     // Boat on accent
-    try {
-      for (const k of generateBoatAccentBonusMoves(board, side)) {
-        const target = (k as any).target as number | undefined;
-        if (typeof k.boat === "number" && typeof target === "number") {
-          safePush({ kind: "boatAccent", boat: k.boat, target });
-        }
+    for (const k of generateBoatAccentBonusMoves(board, side)) {
+      const target = (k as any).target as number | undefined;
+      if (typeof k.boat === "number" && typeof target === "number") {
+        safePush({ kind: "boatAccent", boat: k.boat, target });
       }
-    } catch { /* ignore */ }
+    }
   }
 
   return moves;
-} // <<< important: close generateAllMoves
+} // <<< close generateAllMoves
 
-// Move ordering heuristic: shallow eval of child + center bias + short paths first.
-function orderMoves(board: Board, side: Side, moves: AnyMove[]): AnyMove[] {
+// Move ordering heuristic: shallow eval of child + center bias + short paths + killer/history.
+function orderMoves(board: Board, side: Side, moves: AnyMove[], ply = 0): AnyMove[] {
+  const k1 = killers[ply]?.[0], k2 = killers[ply]?.[1];
   const scored = moves.map(mv => {
     let landingIdx1 = -1;
     if (mv.kind === "arrange") landingIdx1 = mv.path[mv.path.length - 1];
@@ -186,19 +211,18 @@ function orderMoves(board: Board, side: Side, moves: AnyMove[]): AnyMove[] {
     let centerBias = 0;
     if (landingIdx1 > 0) {
       const { x, y } = coordsOf(landingIdx1 - 1);
-      centerBias = -(Math.abs(x) + Math.abs(y)); // closer is better
+      centerBias = -(Math.abs(x) + Math.abs(y));
     }
 
     let val = 0;
-    try {
-      const child = applyMoveCloned(board, side, mv);
-      val = evaluate(child, side);
-    } catch {
-      val = -1e9; // illegal/failed moves pushed to end
-    }
+    try { val = evaluate(applyMoveCloned(board, side, mv), side); } catch { val = -1e9; }
 
     const shortPathBias = mv.kind === "arrange" ? -mv.path.length : 0;
-    return { mv, key: val * 1000 + centerBias * 10 + shortPathBias };
+    const killerBonus = (k1 && JSON.stringify(k1) === JSON.stringify(mv) ? 5000 :
+                        (k2 && JSON.stringify(k2) === JSON.stringify(mv) ? 3000 : 0));
+    const histBonus = (history.get(histKey(mv)) ?? 0);
+
+    return { mv, key: val * 1000 + centerBias * 10 + shortPathBias + killerBonus + histBonus };
   });
 
   scored.sort((a, b) => b.key - a.key);
@@ -219,12 +243,15 @@ function searchAlphaBeta(
   alpha: Score,
   beta: Score,
   startMs: number,
-  opts: SearchOpts
+  opts: SearchOpts,
+  ply = 0
 ): { score: Score, best?: AnyMove } {
+  // time check
   if (opts.maxMs && performance.now() - startMs > opts.maxMs) {
     return { score: evaluate(board, side) };
   }
 
+  // TT probe
   const key = boardKey(board, side);
   const tt = TT.get(key);
   if (tt && tt.depth >= depth) {
@@ -238,7 +265,7 @@ function searchAlphaBeta(
     return { score: evaluate(board, side) };
   }
 
-  const moves = orderMoves(board, side, generateAllMoves(board, side));
+  const moves = orderMoves(board, side, generateAllMoves(board, side), ply);
   if (moves.length === 0) {
     return { score: evaluate(board, side) };
   }
@@ -252,25 +279,36 @@ function searchAlphaBeta(
     try { child = applyMoveCloned(board, side, mv); }
     catch { continue; }
 
-    const { score: childScore } =
-      searchAlphaBeta(child, other(side), depth - 1, -beta, -localAlpha, startMs, opts);
+    const res = searchAlphaBeta(child, other(side), depth - 1, -beta, -localAlpha, startMs, opts, ply + 1);
+    const v = -res.score;
 
-    const v = -childScore;
     if (v > value) { value = v; best = mv; }
     if (v > localAlpha) localAlpha = v;
-    if (localAlpha >= beta) break; // beta cutoff
+
+    if (localAlpha >= beta) {
+      // killer + history on cutoff
+      if (killers[ply]) {
+        if (!killers[ply][0] || JSON.stringify(killers[ply][0]) !== JSON.stringify(mv)) {
+          killers[ply][1] = killers[ply][0];
+          killers[ply][0] = mv;
+        }
+      }
+      const hk = histKey(mv);
+      history.set(hk, (history.get(hk) ?? 0) + depth * 100);
+      break; // beta cutoff
+    }
   }
 
   // Store in TT
   let flag: TTFlag = "EXACT";
   if (value <= alpha) flag = "UPPER";
   else if (value >= beta) flag = "LOWER";
-  TT.set(key, { depth, score: value, flag, best });
+  TT_set(key, { depth, score: value, flag, best });
 
   return { score: value, best };
 }
 
-// Iterative deepening wrapper with optional time limit.
+// Iterative deepening wrapper with optional time limit (aspiration windows).
 function searchIterativeDeepening(
   board: Board,
   side: Side,
@@ -281,9 +319,28 @@ function searchIterativeDeepening(
   const start = performance.now();
   let lastBest: AnyMove | null = null;
 
+  let window = 0.5; // start narrow; tune later
+  let guess = 0;
+
   for (let d = 1; d <= maxDepth; d++) {
-    const { best } = searchAlphaBeta(board, side, d, -Infinity, Infinity, start, { maxDepth, maxMs });
-    if (best) lastBest = best;
+    let alpha = guess - window, beta = guess + window;
+    let result: { score: number; best?: AnyMove };
+
+    while (true) {
+      result = searchAlphaBeta(board, side, d, alpha, beta, start, { maxDepth, maxMs });
+      if (result.score <= alpha) { // fail-low, widen downward
+        alpha -= window * 2; window *= 2;
+      } else if (result.score >= beta) { // fail-high, widen upward
+        beta += window * 2; window *= 2;
+      } else {
+        break; // in-window
+      }
+      if (maxMs && performance.now() - start > maxMs) break;
+    }
+
+    if (result.best) lastBest = result.best;
+    guess = result.score;
+    window = Math.max(0.5, window * 0.75); // slightly tighten for next depth
     if (maxMs && performance.now() - start > maxMs) break;
   }
   return lastBest;
