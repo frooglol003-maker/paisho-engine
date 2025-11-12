@@ -95,6 +95,18 @@ function boardKey(board: Board, side: Side): string {
   return s;
 }
 
+// Forward-declared in this file; function declarations are hoisted.
+export function applyPlannedArrange(board: Board, mv: PlannedArrange): Board {
+  const final1 = mv.path[mv.path.length - 1];
+  const cloned = board.clone();
+  const piece = cloned.getAtIndex(mv.from);
+  const dest  = cloned.getAtIndex(final1);
+  cloned.setAtIndex(mv.from, 0);
+  if (dest) cloned.setAtIndex(final1, 0);
+  if (piece) cloned.setAtIndex(final1, piece);
+  return cloned;
+}
+
 // Make move on a cloned board and return it.
 // Uses existing apply* helpers so we keep one source of truth.
 function applyMoveCloned(board: Board, side: Side, mv: AnyMove): Board {
@@ -106,7 +118,7 @@ function applyMoveCloned(board: Board, side: Side, mv: AnyMove): Board {
   }
 }
 
-// Generate all candidate moves. We call existing generators if present.
+// Generate all candidate moves (arrange + bonus). Bonus are deduped and pre-checked.
 function generateAllMoves(board: Board, side: Side): AnyMove[] {
   const moves: AnyMove[] = [];
 
@@ -117,14 +129,12 @@ function generateAllMoves(board: Board, side: Side): AnyMove[] {
     }
   } catch {}
 
-    // Bonus: Wheel / Boat (robust, deduped, prechecked)
+  // Bonus: Wheel / Boat (robust, deduped, prechecked)
   {
     const seen = new Set<string>();
     const safePush = (mv: AnyMove) => {
-      // de-dupe by a stable key
       const key = JSON.stringify(mv);
       if (seen.has(key)) return;
-      // quick legality probe on a clone; skip if it throws
       try {
         void applyMoveCloned(board, side, mv);
         seen.add(key);
@@ -141,7 +151,7 @@ function generateAllMoves(board: Board, side: Side): AnyMove[] {
           safePush({ kind: "wheel", center: c.center });
         }
       }
-    } catch { /* generator not available or failed */ }
+    } catch { /* ignore */ }
 
     // Boat on flower
     try {
@@ -155,7 +165,6 @@ function generateAllMoves(board: Board, side: Side): AnyMove[] {
     // Boat on accent
     try {
       for (const k of generateBoatAccentBonusMoves(board, side)) {
-        // some plan types may omit target; prefer the explicit one
         const target = (k as any).target as number | undefined;
         if (typeof k.boat === "number" && typeof target === "number") {
           safePush({ kind: "boatAccent", boat: k.boat, target });
@@ -165,7 +174,7 @@ function generateAllMoves(board: Board, side: Side): AnyMove[] {
   }
 
   return moves;
-
+} // <<< important: close generateAllMoves
 
 // Move ordering heuristic: shallow eval of child + center bias + short paths first.
 function orderMoves(board: Board, side: Side, moves: AnyMove[]): AnyMove[] {
@@ -328,18 +337,6 @@ export function generateLegalArrangeMoves(board: Board, side: Side): PlannedArra
   return out;
 }
 
-// ---------- Apply (returns cloned board) ----------
-export function applyPlannedArrange(board: Board, mv: PlannedArrange): Board {
-  const final1 = mv.path[mv.path.length - 1];
-  const cloned = board.clone();
-  const piece = cloned.getAtIndex(mv.from);
-  const dest  = cloned.getAtIndex(final1);
-  cloned.setAtIndex(mv.from, 0);
-  if (dest) cloned.setAtIndex(final1, 0);
-  if (piece) cloned.setAtIndex(final1, piece);
-  return cloned;
-}
-
 // ---------- Public search entry ----------
 export function pickBestMove(board: Board, side: Side, depth: number, opts?: { maxMs?: number }) {
   const move = searchIterativeDeepening(board, side, depth, opts?.maxMs);
@@ -404,7 +401,7 @@ export function generateBoatAccentBonusMoves(board: Board, side: Side): _BoatAcc
       if (d.type === TypeId.Boat) continue; // must be a non-boat accent
 
       const res = planBoatOnAccent(board, target, b);
-      if (res.ok) out.push({ boat: b, remove: res.remove.map(r => r.remove) });
+      if (res.ok) out.push({ boat: b, target, remove: res.remove.map(r => r.remove) });
     }
   }
   return out;
