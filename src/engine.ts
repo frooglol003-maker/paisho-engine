@@ -20,7 +20,7 @@ export type PlannedArrange = { from: number; path: number[] };
 type _IndexMove = { from: number; to: number };
 type _WheelPlan = { center: number; moves: _IndexMove[] };
 type _BoatFlowerPlan = { boat: number; from: number; to: number };
-type _BoatAccentPlan = { boat: number; remove: number[] };
+type _BoatAccentPlan = { boat: number; target: number; remove: number[] };
 
 // ---------- Helpers ----------
 function opposite(s: Side): Side { return s === "host" ? "guest" : "host"; }
