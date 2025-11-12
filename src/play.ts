@@ -516,16 +516,27 @@ async function main() {
       }
 
       if (line.toLowerCase().startsWith("place ")) {
-        // place TYPE OWNER x,y  (debug)
-        const parts = line.trim().split(/\s+/);
-        if (parts.length !== 4) throw new Error("Use: place TYPE OWNER x,y");
-        const type = toTypeId(parts[1]);
-        const owner = toOwner(parts[2]);
-        const { x, y } = xyFromString(parts[3]);
-        b.setAtIndex(idx1(x, y), packPiece(type, owner));
-        console.log(boardWithSidebar(b));
-        continue;
-      }
+  // place TYPE OWNER x,y [next]
+  // e.g. place R3 host 0,0 next   → also hands turn to the other side
+  const parts = line.trim().split(/\s+/);
+  if (parts.length < 4 || parts.length > 5) throw new Error("Use: place TYPE OWNER x,y [next]");
+  const type = toTypeId(parts[1]);
+  const owner = toOwner(parts[2]);
+  const { x, y } = xyFromString(parts[3]);
+  const advance = (parts[4]?.toLowerCase() === "next");
+
+  b.setAtIndex(idx1(x, y), packPiece(type, owner));
+  console.log(boardWithSidebar(b));
+
+  // If you placed for the current side, we usually want to pass the move.
+  // Also allow explicit 'next' to force passing the move.
+  const ownerSide: Side = owner === Owner.Host ? "host" : "guest";
+  if (advance || ownerSide === toMove) {
+    toMove = toMove === "host" ? "guest" : "host";
+  }
+  continue;
+}
+
 
       console.log("Unknown command. Type 'help'.");
     } catch (e: any) {
