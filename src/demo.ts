@@ -1,27 +1,25 @@
 // src/demo.ts
 import { performance } from "perf_hooks";
-import { Board, TypeId, Owner, packPiece } from "./board";
-import { pickBestMove } from "./engine";
+import { Board, TypeId, Owner, packPiece, unpackPiece } from "./board";
+import { pickBestMove, applyPlannedArrange, searchStats } from "./engine";
 import { coordsOf, indexOf } from "./coords";
-import { applyPlannedArrange } from "./engine";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
 
-// --- CLI args ---
-const args = Object.fromEntries(
-  process.argv.slice(2).map(s => {
-    const m = s.match(/^--([^=]+)=(.*)$/);
-    if (m) return [m[1], m[2]];
-    return [s.replace(/^--/, ""), true];
-  })
-);
+// ---------- CLI args ----------
+function getArg(name: string, def?: string) {
+  const hit = process.argv.find(a => a.startsWith(`--${name}=`));
+  return hit ? hit.split("=")[1] : def;
+}
+const SIDE = (getArg("side", "host")! as "host" | "guest");
+const DEPTH = Math.max(1, parseInt(getArg("depth", "3")!, 10));
+const TIME_MS = (() => {
+  const v = getArg("time", "");
+  return v ? Math.max(1, parseInt(v, 10)) : undefined;
+})();
+const SELFPLIES = Math.max(0, parseInt(getArg("selfplay", "0")!, 10));
+const SCENARIO = (getArg("scenario", "small")! as "small" | "empty");
 
-const SIDE   = (args.side === "guest" ? "guest" : "host") as "host"|"guest";
-const DEPTH  = Math.max(1, parseInt(String(args.depth ?? "3"), 10));
-const TIMEMS = args.time ? Math.max(1, parseInt(String(args.time), 10)) : undefined;
-const SELFPLIES = Math.max(0, parseInt(String(args.selfplay ?? "0"), 10));
-const SCENARIO  = (args.scenario ?? "small") as "small" | "empty";
-
-// --- Helpers ---
+// ---------- Helpers ----------
 function idx1(x: number, y: number): number {
   const i0 = indexOf(x, y);
   if (i0 === -1) throw new Error(`invalid XY (${x},${y})`);
@@ -38,10 +36,7 @@ function setupSmallPosition(): Board {
   b.setAtIndex(idx1(0, 1), packPiece(TypeId.R4, Owner.Host));
   return b;
 }
-
-function setupEmpty(): Board {
-  return new Board();
-}
+function setupEmpty(): Board { return new Board(); }
 
 function boardToAscii(b: Board): string {
   const lines: string[] = [];
@@ -49,30 +44,26 @@ function boardToAscii(b: Board): string {
   let base = 1;
   for (let r = 0; r < widths.length; r++) {
     const w = widths[r];
-    const pad = " ".repeat((17 - w));
+    const pad = " ".repeat(17 - w);
     const cells: string[] = [];
     for (let c = 0; c < w; c++) {
       const idx = base + c;
       const p = b.getAtIndex(idx);
       if (!p) { cells.push("·"); continue; }
-      const { type, owner } = ((): {type: TypeId, owner: Owner} => {
-        const d = require("./board").unpackPiece(p)!;
-        return d;
-      })();
-      const ownerChar = owner === Owner.Host ? "" : ""; // you can mark guest with lower-case if you want
+      const d = unpackPiece(p)!;
       const sym =
-        type === TypeId.R3 ? "R3" :
-        type === TypeId.R4 ? "R4" :
-        type === TypeId.R5 ? "R5" :
-        type === TypeId.W3 ? "W3" :
-        type === TypeId.W4 ? "W4" :
-        type === TypeId.W5 ? "W5" :
-        type === TypeId.Lotus ? "L " :
-        type === TypeId.Orchid ? "O " :
-        type === TypeId.Rock ? "⛰ " :
-        type === TypeId.Wheel ? "⟳ " :
-        type === TypeId.Boat ? "⛵ " :
-        type === TypeId.Knotweed ? "✣ " : "??";
+        d.type === TypeId.R3 ? "R3" :
+        d.type === TypeId.R4 ? "R4" :
+        d.type === TypeId.R5 ? "R5" :
+        d.type === TypeId.W3 ? "W3" :
+        d.type === TypeId.W4 ? "W4" :
+        d.type === TypeId.W5 ? "W5" :
+        d.type === TypeId.Lotus ? "L " :
+        d.type === TypeId.Orchid ? "O " :
+        d.type === TypeId.Rock ? "⛰ " :
+        d.type === TypeId.Wheel ? "⟳ " :
+        d.type === TypeId.Boat ? "⛵ " :
+        d.type === TypeId.Knotweed ? "✣ " : "??";
       cells.push(sym.trim());
     }
     lines.push(pad + cells.join(" ") + pad);
@@ -86,21 +77,19 @@ function printMove(m: any) {
   if (m.kind === "arrange") {
     const fromXY = coordsOf(m.from - 1);
     const toXY = coordsOf(m.path[m.path.length - 1] - 1);
-    console.log(
-      `→ ARRANGE from ${JSON.stringify(fromXY)} -> ${JSON.stringify(toXY)} (steps=${m.path.length})`
-    );
+    console.log(`\n→ ARRANGE from ${JSON.stringify(fromXY)} -> ${JSON.stringify(toXY)} (steps=${m.path.length})`);
   } else if (m.kind === "wheel") {
     const at = coordsOf(m.center - 1);
-    console.log(`→ WHEEL at ${JSON.stringify(at)}`);
+    console.log(`\n→ WHEEL at ${JSON.stringify(at)}`);
   } else if (m.kind === "boatFlower") {
     const s = coordsOf(m.from - 1);
     const t = coordsOf(m.to - 1);
-    console.log(`→ BOAT-FLOWER move ${JSON.stringify(s)} -> ${JSON.stringify(t)} (boat @ ${m.boat})`);
+    console.log(`\n→ BOAT-FLOWER ${JSON.stringify(s)} -> ${JSON.stringify(t)} (boat @ idx1=${m.boat})`);
   } else if (m.kind === "boatAccent") {
     const t = coordsOf(m.target - 1);
-    console.log(`→ BOAT-ACCENT remove accent @ ${JSON.stringify(t)} with boat ${m.boat}`);
+    console.log(`\n→ BOAT-ACCENT remove accent @ ${JSON.stringify(t)} with boat idx1=${m.boat}`);
   } else {
-    console.log("→", m);
+    console.log("\n→", m);
   }
 }
 
@@ -114,28 +103,29 @@ function applyAnyMove(board: Board, side: "host"|"guest", m: any): Board {
   }
 }
 
-// --- Main ---
+// ---------- Main ----------
 async function main() {
-  const board =
-    SCENARIO === "empty" ? setupEmpty()
-    : setupSmallPosition();
+  const board = (SCENARIO === "empty" ? setupEmpty() : setupSmallPosition());
 
-  console.log(`Scenario: ${SCENARIO} | Side: ${SIDE} | Depth: ${DEPTH} | Time: ${TIMEMS ?? "∞"}ms | Self-play plies: ${SELFPLIES}`);
+  console.log(`Scenario: ${SCENARIO} | Side: ${SIDE} | Depth: ${DEPTH} | Time: ${TIME_MS ?? "∞"}ms | Self-play plies: ${SELFPLIES}`);
   console.log(boardToAscii(board));
   console.log("");
 
-  // Search once
+  // One search
   const t0 = performance.now();
-  const move = pickBestMove(board, SIDE, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
+  const move = pickBestMove(board, SIDE, DEPTH, TIME_MS ? { maxMs: TIME_MS } : undefined);
   const t1 = performance.now();
   printMove(move);
-  console.log(`search: ${(t1 - t0)/1000}s`);
+  console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
+  try {
+    console.log(`nodes=${searchStats.nodes.toLocaleString()} | ttHits=${searchStats.ttHits.toLocaleString()} | cutoffs=${searchStats.cutoffs.toLocaleString()}`);
+  } catch { /* stats may not be exported */ }
 
-  // Optional selfplay (alternates sides)
+  // Optional self-play
   let b = board;
-  let side: "host"|"guest" = SIDE;
+  let side: "host" | "guest" = SIDE;
   for (let p = 0; p < SELFPLIES; p++) {
-    const mv = pickBestMove(b, side, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
+    const mv = pickBestMove(b, side, DEPTH, TIME_MS ? { maxMs: TIME_MS } : undefined);
     if (!mv) break;
     b = applyAnyMove(b, side, mv);
     side = side === "host" ? "guest" : "host";
