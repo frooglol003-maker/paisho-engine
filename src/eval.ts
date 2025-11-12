@@ -79,11 +79,11 @@ function mobility(board: Board): { host: number; guest: number } {
  * Learned weights: these are placeholders. After you run `npm run learn`,
  * paste the printed WEIGHTS block here to replace these numbers.
  */
-const WEIGHTS = {
-  materialDiff: 1.0,
-  harmonyDegDiff: 1.5,
-  centerDiff: 0.4,
-  mobilityDiff: 0.2,
+const WEIGHTS = { 
+  materialDiff: 7.977498, 
+  harmonyDegDiff: 0.000000, 
+  centerDiff: 0.000000, 
+  mobilityDiff: -0.069078 
 };
 
 /**
