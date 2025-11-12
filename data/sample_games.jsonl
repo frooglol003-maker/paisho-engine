@@ -1,2 +1,1 @@
 {"id":"ex1","setup":[{"owner":"host","type":"R3","index":125},{"owner":"guest","type":"W3","index":126}],"moves":[{"kind":"arrange","side":"host","from":125,"path":[126]}],"result":"host"}
-{"id":"ex2","setup":[{"owner":"host","type":"R4","index":124},{"owner":"guest","type":"W4","index":140}],"moves":[{"kind":"arrange","side":"guest","from":140,"path":[139]}],"result":"guest"}
