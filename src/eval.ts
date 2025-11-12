@@ -6,9 +6,11 @@ import { getPieceDescriptor } from "./rules";
 import { coordsOf } from "./coords";
 import { buildHarmonyGraph } from "./move";
 
-export type Side = "host" | "guest";
+// Local alias (do NOT export to avoid name clash with engine.ts)
+type Pov = "host" | "guest";
 
 const MATERIAL: Record<TypeId, number> = {
+  [TypeId.Empty]: 0, // <-- needed for the full enum coverage
   [TypeId.R3]: 3,
   [TypeId.R4]: 4,
   [TypeId.R5]: 5,
@@ -23,7 +25,7 @@ const MATERIAL: Record<TypeId, number> = {
   [TypeId.Knotweed]: 0,
 };
 
-function whoOwns(packed: number | null): Side | null {
+function whoOwns(packed: number | null): Pov | null {
   if (!packed) return null;
   const d = unpackPiece(packed)!;
   return d.owner === 0 ? "host" : "guest";
@@ -38,7 +40,7 @@ function centerBonus(idx1: number): number {
   return Math.abs(x) + Math.abs(y) <= 3 ? 1 : 0;
 }
 
-export function evaluate(board: Board, pov: Side): number {
+export function evaluate(board: Board, pov: Pov): number {
   const N = (board as any).size1Based ?? 249;
   let hostScore = 0;
   let guestScore = 0;
@@ -54,7 +56,7 @@ export function evaluate(board: Board, pov: Side): number {
   }
 
   // Harmony connectivity (degree sum)
-  const g = buildHarmonyGraph(board); // already respects Rock/Knotweed via isHarmonyActivePair in move.ts
+  const g = buildHarmonyGraph(board); // respects Rock/Knotweed via isHarmonyActivePair in move.ts
   for (const [node, neighbors] of g) {
     const owner = whoOwns(board.getAtIndex(node));
     if (!owner) continue;
