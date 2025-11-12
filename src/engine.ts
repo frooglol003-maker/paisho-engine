@@ -74,7 +74,7 @@ function TT_set(key: string, val: TTEntry) {
   }
   TT.set(key, val);
 }
-
+export const searchStats = { nodes: 0, ttHits: 0, cutoffs: 0 };
 // Zobrist-based position key
 function boardKey(board: Board, side: Side): string {
   const N: number = (board as any).size1Based ?? 249;
@@ -216,6 +216,7 @@ interface SearchOpts {
 }
 
 function searchAlphaBeta(
+  searchStats.nodes++;
   board: Board,
   side: Side,
   depth: number,
@@ -294,6 +295,10 @@ function searchIterativeDeepening(
   maxDepth: number,
   maxMs?: number
 ): AnyMove | null {
+  TT.clear();
+  searchStats.nodes = 0;
+  searchStats.ttHits = 0;
+  searchStats.cutoffs = 0;
   TT.clear();
   const start = performance.now();
   let lastBest: AnyMove | null = null;
