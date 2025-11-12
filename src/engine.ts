@@ -45,7 +45,6 @@ function isType(board: Board, idx1: number, t: TypeId): boolean {
   return d.type === t;
 }
 
-
 // ---------- Search core (alpha–beta + ordering + TT + time limit) ----------
 type ArrangeMove = { kind: "arrange"; from: number; path: number[] };
 type WheelMove   = { kind: "wheel"; center: number };
@@ -74,7 +73,10 @@ function TT_set(key: string, val: TTEntry) {
   }
   TT.set(key, val);
 }
+
+// stats (for demo)
 export const searchStats = { nodes: 0, ttHits: 0, cutoffs: 0 };
+
 // Zobrist-based position key
 function boardKey(board: Board, side: Side): string {
   const N: number = (board as any).size1Based ?? 249;
@@ -150,16 +152,12 @@ function generateAllMoves(board: Board, side: Side): AnyMove[] {
         void applyMoveCloned(board, side, mv);
         seen.add(key);
         moves.push(mv);
-      } catch {
-        /* ignore unplayable bonus */
-      }
+      } catch { /* ignore unplayable bonus */ }
     };
 
     // Wheel
     for (const c of generateWheelBonusMoves(board, side)) {
-      if (typeof c.center === "number") {
-        safePush({ kind: "wheel", center: c.center });
-      }
+      if (typeof c.center === "number") safePush({ kind: "wheel", center: c.center });
     }
     // Boat on flower
     for (const b of generateBoatFlowerBonusMoves(board, side)) {
@@ -216,7 +214,6 @@ interface SearchOpts {
 }
 
 function searchAlphaBeta(
-  searchStats.nodes++;
   board: Board,
   side: Side,
   depth: number,
@@ -226,6 +223,9 @@ function searchAlphaBeta(
   opts: SearchOpts,
   ply = 0
 ): { score: Score, best?: AnyMove } {
+  // node count
+  searchStats.nodes++;
+
   // time check
   if (opts.maxMs && performance.now() - startMs > opts.maxMs) {
     return { score: evaluate(board, side) };
@@ -235,6 +235,7 @@ function searchAlphaBeta(
   const key = boardKey(board, side);
   const tt = TT.get(key);
   if (tt && tt.depth >= depth) {
+    searchStats.ttHits++;
     if (tt.flag === "EXACT") return { score: tt.score, best: tt.best };
     if (tt.flag === "LOWER" && tt.score > alpha) alpha = tt.score;
     else if (tt.flag === "UPPER" && tt.score < beta) beta = tt.score;
@@ -267,6 +268,7 @@ function searchAlphaBeta(
 
     if (localAlpha >= beta) {
       // killer + history on cutoff
+      searchStats.cutoffs++;
       if (killers[ply]) {
         if (!killers[ply][0] || JSON.stringify(killers[ply][0]) !== JSON.stringify(mv)) {
           killers[ply][1] = killers[ply][0];
@@ -299,7 +301,7 @@ function searchIterativeDeepening(
   searchStats.nodes = 0;
   searchStats.ttHits = 0;
   searchStats.cutoffs = 0;
-  TT.clear();
+
   const start = performance.now();
   let lastBest: AnyMove | null = null;
 
