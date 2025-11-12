@@ -1,8 +1,7 @@
 // board.ts
 // Compact board representation (Int16Array) and packing helpers.
 
-import { totalIntersections, coordsOf } from "./coords";
-
+import { totalIntersections, coordsOf, indexOf } from "./coords"; // <- imported indexOf
 // Total playable intersections (should be 249)
 export const TOTAL_POINTS = totalIntersections();
 
