@@ -64,6 +64,86 @@ export function evaluate(board: Board, pov: Pov): number {
     else guestScore += neighbors.length;
   }
 
-  // POV score
-  return pov === "host" ? hostScore - guestScore : guestScore - hostScore;
+ // Learned weights from 1 samples
+const WEIGHTS = { materialDiff: 0.000000, harmonyDegDiff: 0.000000, centerDiff: 0.000000, mobilityDiff: 0.000000 };
+
+export function evaluate(board: Board, pov: "host" | "guest"): number {
+  // Compute raw (host - guest) feature diffs, then flip by pov
+  const f = (function(){
+    const m = (function material(board) {
+    const N = board.size1Based ?? 249;
+    let host = 0, guest = 0;
+    for (let i = 1; i <= N; i++) {
+        const p = board.getAtIndex(i);
+        if (!p)
+            continue;
+        const d = (0, board_1.unpackPiece)(p);
+        // base piece values; accents=0 here—we’ll learn their effect via other features
+        const val = d.type === board_1.TypeId.R3 || d.type === board_1.TypeId.W3 ? 3 :
+            d.type === board_1.TypeId.R4 || d.type === board_1.TypeId.W4 ? 4 :
+                d.type === board_1.TypeId.R5 || d.type === board_1.TypeId.W5 ? 5 :
+                    d.type === board_1.TypeId.Lotus ? 7 :
+                        d.type === board_1.TypeId.Orchid ? 6 : 0;
+        if (d.owner === 0)
+            host += val;
+        else
+            guest += val;
+    }
+    return { host, guest };
+})(board);
+    const h = (function harmonyDeg(board) {
+    const g = (0, move_1.buildHarmonyGraph)(board);
+    let host = 0, guest = 0;
+    for (const [node, neighbors] of g) {
+        const p = board.getAtIndex(node);
+        if (!p)
+            continue;
+        const d = (0, board_1.unpackPiece)(p);
+        if (d.owner === 0)
+            host += neighbors.length;
+        else
+            guest += neighbors.length;
+    }
+    return { host, guest };
+})(board);
+    const c = (function centerCount(board) {
+    const N = board.size1Based ?? 249;
+    let host = 0, guest = 0;
+    for (let i = 1; i <= N; i++) {
+        const p = board.getAtIndex(i);
+        if (!p)
+            continue;
+        const d = (0, board_1.unpackPiece)(p);
+        const { x, y } = (0, coords_1.coordsOf)(i - 1);
+        const isCenter = Math.abs(x) + Math.abs(y) <= 3;
+        if (!isCenter)
+            continue;
+        if (d.owner === 0)
+            host++;
+        else
+            guest++;
+    }
+    return { host, guest };
+})(board);
+    const mo = (function mobility(board) {
+    const hostMoves = (0, engine_1.generateLegalArrangeMoves)(board, "host").length;
+    const guestMoves = (0, engine_1.generateLegalArrangeMoves)(board, "guest").length;
+    return { host: hostMoves, guest: guestMoves };
+})(board);
+    return {
+      materialDiff: m.host - m.guest,
+      harmonyDegDiff: h.host - h.guest,
+      centerDiff: c.host - c.guest,
+      mobilityDiff: mo.host - mo.guest,
+    };
+  })();
+
+  const raw =
+    WEIGHTS.materialDiff * f.materialDiff +
+    WEIGHTS.harmonyDegDiff * f.harmonyDegDiff +
+    WEIGHTS.centerDiff   * f.centerDiff +
+    WEIGHTS.mobilityDiff * f.mobilityDiff;
+
+  return pov === "host" ? raw : -raw;
 }
+
