@@ -500,6 +500,7 @@ export function planBoatOnAccent(
   // Remove both the accent and the boat
   return { ok: true, remove: [{ remove: accentIdx1 }, { remove: boatIdx1 }] };
 }
+// One-call harmony helper: pair check + Rock/Knotweed cancellation.
 export function isHarmonyActivePair(
   board: Board,
   aIdx1: number,
@@ -510,7 +511,6 @@ export function isHarmonyActivePair(
   bNum: 3 | 4 | 5
 ): boolean {
   if (!harmoniousPair(aGarden, aNum, bGarden, bNum)) return false;
-  // This uses the accent logic already in rules.ts
   if (harmonyCancelledByAccents(board, aIdx1, bIdx1)) return false;
   return true;
 }
