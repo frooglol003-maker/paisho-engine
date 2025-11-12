@@ -499,3 +499,17 @@ export function planBoatOnAccent(
   // Remove both the accent and the boat
   return { ok: true, remove: [{ remove: accentIdx1 }, { remove: boatIdx1 }] };
 }
+// One-call harmony helper: check pair + accent cancellation
+export function isHarmonyActivePair(
+  board: Board,
+  aIdx1: number,
+  bIdx1: number,
+  aGarden: "R" | "W",
+  aNum: 3 | 4 | 5,
+  bGarden: "R" | "W",
+  bNum: 3 | 4 | 5
+): boolean {
+  if (!harmoniousPair(aGarden, aNum, bGarden, bNum)) return false;
+  if (harmonyCancelledByAccents(board, aIdx1, bIdx1)) return false;
+  return true;
+}
