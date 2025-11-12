@@ -81,8 +81,8 @@ function mobility(board: Board): { host: number; guest: number } {
  */
 const WEIGHTS = {
   materialDiff: 1.0,
-  harmonyDegDiff: 1.0,
-  centerDiff: 0.5,
+  harmonyDegDiff: 1.5,
+  centerDiff: 0.4,
   mobilityDiff: 0.2,
 };
 
