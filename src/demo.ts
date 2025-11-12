@@ -173,5 +173,6 @@ async function main() {
     printMove(mv);
   }
 }
-
-main().catch(e => { console.error(e); process.exit(1); });
+main()
+  .then(() => process.exit(0))
+  .catch(e => { console.error(e); process.exit(1); });
