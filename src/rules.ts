@@ -1,6 +1,7 @@
 // src/rules.ts
 // Garden/gate classification, harmony/clash utilities, special-flowers helpers,
-// and piece descriptor helpers. Designed to be compatible with the current codebase.
+// Accent logic (pure planners), and piece descriptor helpers.
+// Designed to be compatible with the current codebase.
 
 import { Pt, generateValidPoints, coordsOf, indexOf } from "./coords";
 import { Board, TypeId, unpackPiece } from "./board";
@@ -22,7 +23,7 @@ export function isGateCoord(x: number, y: number): boolean {
 export type IntersectionType = "gate" | "white" | "red" | "neutral";
 
 /**
- * Heuristic quadrant classifier consistent with your board art:
+ * Heuristic quadrant classifier consistent with board art:
  * - gates: the four cardinal points
  * - midlines (x=0 or y=0) and diagonals |x|===|y| are neutral
  * - (+,+) & (-,-) are white; (+,-) & (-,+) are red
@@ -139,7 +140,6 @@ export function getPieceDescriptor(board: Board, index: number): PieceKind {
     case TypeId.Lotus:
       return { kind: "lotus", owner, blooming };
     case TypeId.Orchid: {
-      // Orchid is wild if the same owner has a BLOOMING Lotus on the board
       const wild = ownerHasBloomingLotus(board, owner);
       return { kind: "orchid", owner, blooming, wild };
     }
@@ -231,4 +231,271 @@ export function isTrappedByOrchid(board: Board, index: number): boolean {
     }
   }
   return false;
+}
+
+// -----------------------------------------------------------------------------
+// Accent logic (ROCK, KNOTWEED, WHEEL, BOAT) — pure planners (no mutation)
+// Integrate by calling these from move generation / harmony evaluation.
+// -----------------------------------------------------------------------------
+
+function isAccentType(t: TypeId): boolean {
+  return (
+    t === TypeId.Rock ||
+    t === TypeId.Wheel ||
+    t === TypeId.Boat ||
+    t === TypeId.Knotweed
+  );
+}
+function isRock(t: TypeId): boolean { return t === TypeId.Rock; }
+function isKnotweed(t: TypeId): boolean { return t === TypeId.Knotweed; }
+function isWheel(t: TypeId): boolean { return t === TypeId.Wheel; }
+function isBoat(t: TypeId): boolean { return t === TypeId.Boat; }
+
+/** Return true if there is a Rock at a given 1-based board index. */
+export function isRockAt(board: Board, idx1: number): boolean {
+  const p = board.getAtIndex(idx1);
+  if (!p) return false;
+  const dec = unpackPiece(p)!;
+  return isRock(dec.type);
+}
+
+/** Return true if there is a Knotweed at a given 1-based board index. */
+export function isKnotweedAt(board: Board, idx1: number): boolean {
+  const p = board.getAtIndex(idx1);
+  if (!p) return false;
+  const dec = unpackPiece(p)!;
+  return isKnotweed(dec.type);
+}
+
+/** Scan along an axis between two indices (inclusive=false) and test predicate. */
+function scanAxis(
+  board: Board,
+  aIdx1: number,
+  bIdx1: number,
+  pred: (idx1: number) => boolean
+): boolean {
+  const { x: ax, y: ay } = coordsOf(aIdx1);
+  const { x: bx, y: by } = coordsOf(bIdx1);
+  if (ax !== bx && ay !== by) return false; // not aligned orthogonally
+
+  const stepX = Math.sign(bx - ax);
+  const stepY = Math.sign(by - ay);
+  let x = ax + stepX;
+  let y = ay + stepY;
+
+  while (x !== bx || y !== by) {
+    const mid0 = indexOf(x, y);
+    if (mid0 !== -1) {
+      const mid1 = mid0 + 1;
+      if (pred(mid1)) return true;
+    }
+    x += stepX;
+    y += stepY;
+  }
+  return false;
+}
+
+/**
+ * ROCK: Cancels harmonies along its vertical/horizontal lines.
+ * Use inside your harmony check: if true, the harmony is cancelled.
+ */
+export function hasRockBlockingHarmony(board: Board, aIdx1: number, bIdx1: number): boolean {
+  // If not orthogonal, rock doesn't apply.
+  const { x: ax, y: ay } = coordsOf(aIdx1);
+  const { x: bx, y: by } = coordsOf(bIdx1);
+  if (ax !== bx && ay !== by) return false;
+
+  // Any Rock strictly between A and B?
+  const rockBetween = scanAxis(board, aIdx1, bIdx1, (mid1) => {
+    const p = board.getAtIndex(mid1);
+    if (!p) return false;
+    const dec = unpackPiece(p)!;
+    return isRock(dec.type);
+  });
+  if (rockBetween) return true;
+
+  // Also: if A or B itself is a rock (edge case), treat as cancelled.
+  return isRockAt(board, aIdx1) || isRockAt(board, bIdx1);
+}
+
+/**
+ * KNOTWEED: Cancels harmonies formed by tiles on any of the 8 surrounding points.
+ * If either endpoint sits in a knotweed neighborhood, cancel.
+ */
+export function isHarmonyCancelledByKnotweed(board: Board, aIdx1: number, bIdx1: number): boolean {
+  const nearKnotweed = (idx1: number): boolean => {
+    const { x, y } = coordsOf(idx1);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        if (dx === 0 && dy === 0) continue;
+        const n0 = indexOf(x + dx, y + dy);
+        if (n0 === -1) continue;
+        const n1 = n0 + 1;
+        const p = board.getAtIndex(n1);
+        if (!p) continue;
+        const dec = unpackPiece(p)!;
+        if (isKnotweed(dec.type)) return true;
+      }
+    }
+    return false;
+  };
+  return nearKnotweed(aIdx1) || nearKnotweed(bIdx1);
+}
+
+/** Combined Accent cancellation check to call from your harmony detector. */
+export function harmonyCancelledByAccents(board: Board, aIdx1: number, bIdx1: number): boolean {
+  return hasRockBlockingHarmony(board, aIdx1, bIdx1) ||
+         isHarmonyCancelledByKnotweed(board, aIdx1, bIdx1);
+}
+
+// -----------------------------------------------------------------------------
+// WHEEL planner: rotate the 8 neighbors one step clockwise around the wheel.
+// Returns a move-plan mapping {from -> to} or {ok:false, reason} if illegal.
+// NOTE: We do NOT mutate the board here.
+// -----------------------------------------------------------------------------
+
+export type IndexMove = { from: number; to: number };
+export type PlanResult =
+  | { ok: true; moves: IndexMove[] }
+  | { ok: false; reason: string };
+
+/**
+ * Clockwise ring (relative to center (x,y)):
+ * (-1,-1) -> (0,-1) -> (+1,-1) -> (+1,0) -> (+1,+1) -> (0,+1) -> (-1,+1) -> (-1,0) -> back
+ */
+const CW_RING: Pt[] = [
+  { x: -1, y: -1 },
+  { x:  0, y: -1 },
+  { x:  1, y: -1 },
+  { x:  1, y:  0 },
+  { x:  1, y:  1 },
+  { x:  0, y:  1 },
+  { x: -1, y:  1 },
+  { x: -1, y:  0 },
+];
+
+export function planWheelRotate(board: Board, wheelIdx1: number): PlanResult {
+  // Verify there's a Wheel here
+  const here = board.getAtIndex(wheelIdx1);
+  if (!here) return { ok: false, reason: "empty center" };
+  const hereDec = unpackPiece(here)!;
+  if (!isWheel(hereDec.type)) return { ok: false, reason: "no wheel at center" };
+
+  const { x: cx, y: cy } = coordsOf(wheelIdx1);
+
+  // Collect occupied neighbor indices and their clockwise targets
+  const occupied: number[] = [];
+  const mapping: IndexMove[] = [];
+
+  for (let k = 0; k < CW_RING.length; k++) {
+    const fromRel = CW_RING[k];
+    const toRel   = CW_RING[(k + CW_RING.length - 1) % CW_RING.length]; // move each piece forward (CW target)
+    const from0 = indexOf(cx + fromRel.x, cy + fromRel.y);
+    const to0   = indexOf(cx + toRel.x,   cy + toRel.y);
+    if (from0 === -1 || to0 === -1) {
+      // If any neighbor slot doesn't exist on this board shape, rotation is illegal.
+      return { ok: false, reason: "edge wheel - missing neighbor slot" };
+    }
+    const from1 = from0 + 1;
+    const to1   = to0 + 1;
+
+    const p = board.getAtIndex(from1);
+    if (p) {
+      const pDec = unpackPiece(p)!;
+      // Basic "may not move into Gates" rule for wheel-moved tiles:
+      const { x: tx, y: ty } = coordsOf(to1);
+      if (isGateCoord(tx, ty)) {
+        return { ok: false, reason: "would move into gate" };
+      }
+      // (Optional future rules: forbid moving basic flowers into opposite gardens, etc.)
+      occupied.push(from1);
+      mapping.push({ from: from1, to: to1 });
+    }
+  }
+
+  // Ensure no two pieces target the same cell (shouldn’t happen with a ring).
+  const targets = new Set(mapping.map(m => m.to));
+  if (targets.size !== mapping.length) {
+    return { ok: false, reason: "collision on rotation" };
+  }
+
+  return { ok: true, moves: mapping };
+}
+
+// -----------------------------------------------------------------------------
+// BOAT planners
+// -----------------------------------------------------------------------------
+
+/**
+ * Boat on a BLOOMING flower: move that flower to any adjacent (8-neighborhood) legal target.
+ * Returns a single-move plan or a failure with reason.
+ */
+export function planBoatOnFlower(
+  board: Board,
+  fromIdx1: number,
+  toIdx1: number
+): PlanResult {
+  const p = board.getAtIndex(fromIdx1);
+  if (!p) return { ok: false, reason: "no piece at source" };
+  const dec = unpackPiece(p)!;
+
+  // Only flowers can be boated (R/W 3/4/5, Lotus, Orchid) and must be BLOOMING
+  const isFlower =
+    dec.type === TypeId.R3 ||
+    dec.type === TypeId.R4 ||
+    dec.type === TypeId.R5 ||
+    dec.type === TypeId.W3 ||
+    dec.type === TypeId.W4 ||
+    dec.type === TypeId.W5 ||
+    dec.type === TypeId.Lotus ||
+    dec.type === TypeId.Orchid;
+  if (!isFlower) return { ok: false, reason: "boat source not a flower" };
+  if (!isBloomingIndex(fromIdx1)) return { ok: false, reason: "flower is in a gate" };
+
+  // Adjacent?
+  const { x: fx, y: fy } = coordsOf(fromIdx1);
+  const { x: tx, y: ty } = coordsOf(toIdx1);
+  if (Math.max(Math.abs(fx - tx), Math.abs(fy - ty)) !== 1) {
+    return { ok: false, reason: "target not adjacent" };
+  }
+
+  // Target must exist and be empty and not a gate
+  const targetPacked = board.getAtIndex(toIdx1);
+  if (targetPacked) return { ok: false, reason: "target occupied" };
+  if (isGateCoord(tx, ty)) return { ok: false, reason: "cannot boat into gate" };
+
+  // (Optional future: forbid boating basic flowers into opposite gardens)
+  return { ok: true, moves: [{ from: fromIdx1, to: toIdx1 }] };
+}
+
+/**
+ * Boat on an ACCENT: remove BOTH the Boat and the target Accent.
+ * Returns a two-removals plan encoded as "to self" with a special convention:
+ * we signal removals with from=idx and to=0 (caller can interpret).
+ * If you'd rather, change to a dedicated "remove" action type in your move layer.
+ */
+export type RemovePlan = { remove: number }; // 1-based index to remove
+
+export type BoatAccentPlan =
+  | { ok: true; remove: RemovePlan[] }
+  | { ok: false; reason: string };
+
+export function planBoatOnAccent(
+  board: Board,
+  accentIdx1: number,
+  boatIdx1: number
+): BoatAccentPlan {
+  const a = board.getAtIndex(accentIdx1);
+  if (!a) return { ok: false, reason: "no accent at target" };
+  const aDec = unpackPiece(a)!;
+  if (!isAccentType(aDec.type) || isBoat(aDec.type)) {
+    return { ok: false, reason: "target is not a non-boat accent" };
+  }
+  const b = board.getAtIndex(boatIdx1);
+  if (!b) return { ok: false, reason: "no boat tile provided" };
+  const bDec = unpackPiece(b)!;
+  if (!isBoat(bDec.type)) return { ok: false, reason: "source is not a boat tile" };
+
+  // Remove both the accent and the boat
+  return { ok: true, remove: [{ remove: accentIdx1 }, { remove: boatIdx1 }] };
 }
