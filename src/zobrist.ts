@@ -1,47 +1,84 @@
 // src/zobrist.ts
-// 64-bit Zobrist hashing (as two 32-bit ints) for robustness without BigInt.
-import { TypeId, Owner } from "./board";
+// Lightweight Zobrist hashing for Pai Sho board states.
+// We represent a 64-bit value as a tuple [hi, lo] of unsigned 32-bit ints.
 
-const RNG = (() => {
-  let s1 = 0x9e3779b9 ^ 0xdeadbeef, s2 = 0xa5a5a5a5 ^ 0x7f4a7c15;
-  function next() {
-    // xorshift-ish
-    s1 ^= s1 << 13; s1 ^= s1 >>> 17; s1 ^= s1 << 5;
-    s2 ^= s2 << 17; s2 ^= s2 >>> 13; s2 ^= s2 << 5;
-    // return [hi, lo]
-    return [(s1 ^ (s2 << 1)) >>> 0, (s2 ^ (s1 >>> 1)) >>> 0];
+export type U64 = [number, number];
+
+export function xor64(a: U64, b: U64): U64 {
+  return [(a[0] ^ b[0]) >>> 0, (a[1] ^ b[1]) >>> 0];
+}
+
+/** Turn a 64-bit tuple into a fixed 16-hex-character key string. */
+export function key64(z: U64): string {
+  const hi = z[0] >>> 0;
+  const lo = z[1] >>> 0;
+  const h = hi.toString(16).padStart(8, "0");
+  const l = lo.toString(16).padStart(8, "0");
+  return h + l;
+}
+
+// ---------------- RNG ----------------
+// Two xorshift32 streams; each next() returns a U64 = [hi, lo].
+class XorShift32 {
+  private s: number;
+  constructor(seed: number) {
+    this.s = seed >>> 0 || 0x9e3779b9; // golden ratio seed if 0
   }
-  return { next };
-})();
+  step(): number {
+    // xorshift32
+    let x = this.s;
+    x ^= (x << 13) >>> 0;
+    x ^= (x >>> 17) >>> 0;
+    x ^= (x << 5) >>> 0;
+    this.s = x >>> 0;
+    return this.s;
+  }
+}
 
-// Pieces: for each board index (1..249), for each (type, owner)
-const MAX_SQ = 249;
-const TYPES: TypeId[] = [
-  TypeId.R3, TypeId.R4, TypeId.R5, TypeId.W3, TypeId.W4, TypeId.W5,
-  TypeId.Lotus, TypeId.Orchid, TypeId.Rock, TypeId.Wheel, TypeId.Boat, TypeId.Knotweed
-];
-const OWNERS: Owner[] = [Owner.Host, Owner.Guest];
+class RNG64 {
+  private a: XorShift32;
+  private b: XorShift32;
+  constructor(seedHi = 0x85ebca6b, seedLo = 0xc2b2ae35) {
+    this.a = new XorShift32(seedHi >>> 0);
+    this.b = new XorShift32(seedLo >>> 0);
+  }
+  next(): U64 {
+    // produce two 32-bit words
+    const hi = this.a.step();
+    const lo = this.b.step();
+    return [hi >>> 0, lo >>> 0];
+  }
+}
 
-export const Z_PIECE: [number, number][][][] = (() => {
-  const arr: [number, number][][][] = new Array(MAX_SQ + 1);
-  for (let i = 0; i <= MAX_SQ; i++) {
-    arr[i] = [];
-    for (let t = 0; t < TYPES.length; t++) {
-      arr[i][t] = [];
-      for (let o = 0; o < OWNERS.length; o++) arr[i][t][o] = RNG.next();
+const RNG = new RNG64(0x12345678, 0x9abcdef0);
+
+// ---------------- Tables ----------------
+// Indices: 1..249 (we'll allocate 250 and ignore index 0)
+// Types: 12 (R3,R4,R5,W3,W4,W5,Lotus,Orchid,Rock,Wheel,Boat,Knotweed)
+// Owners: 2 (Host, Guest)
+
+const N_SLOTS = 250;  // support 1..249 inclusive
+const N_TYPES = 12;
+const N_OWNERS = 2;
+
+// Allocate fully-typed 3D array of U64
+const ZP: U64[][][] = Array.from({ length: N_SLOTS }, () =>
+  Array.from({ length: N_TYPES }, () =>
+    Array.from({ length: N_OWNERS }, () => [0, 0] as U64)
+  )
+);
+
+// Fill with random U64 values
+for (let i = 0; i < N_SLOTS; i++) {
+  for (let t = 0; t < N_TYPES; t++) {
+    for (let o = 0; o < N_OWNERS; o++) {
+      ZP[i][t][o] = RNG.next(); // <-- correctly typed as U64
     }
   }
-  return arr;
-})();
-
-export const Z_SIDE: [number, number] = RNG.next();
-
-// XOR two 64-bit tuples
-export function xor64(a: [number, number], b: [number, number]): [number, number] {
-  return [a[0] ^ b[0], a[1] ^ b[1]];
 }
-// Convert 64-bit tuple to a short string key
-export function key64(h: [number, number]): string {
-  // 8 hex bytes compact
-  return h[0].toString(16).padStart(8, "0") + h[1].toString(16).padStart(8, "0");
-}
+
+/** Zobrist piece table, indexed as Z_PIECE[index1][typeIdx][ownerIdx] -> U64 */
+export const Z_PIECE: U64[][][] = ZP;
+
+/** Side-to-move key. */
+export const Z_SIDE: U64 = RNG.next();
