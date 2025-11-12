@@ -238,13 +238,13 @@ function symOf(type: TypeId): string {
 function safeXY(idx1Val: number): string {
   try {
     if (!Number.isInteger(idx1Val) || idx1Val < 1) return "<?>"; // 1-based guard
-    const { x, y } = coordsOf(idx1Val - 1);
-    return `${x},${y}`;
+    const xy = coordsOf(idx1Val - 1) as { x:number; y:number } | undefined;
+    if (!xy) return "<?>"; 
+    return `${xy.x},${xy.y}`;
   } catch {
-    return "<?>"; // fall back if out of board
+    return "<?>"; 
   }
 }
-
 function countsToLines(label: string, m: CountMap, color: string): string[] {
   const rows: string[] = [];
   rows.push(`${BOLD}${color}${label}${RESET}`);
@@ -284,22 +284,31 @@ function boardWithSidebar(board: Board): string {
     const cells: string[] = [];
 
     for (let c = 0; c < w; c++) {
-      const idx = base + c;
-      const p = board.getAtIndex(idx);
-      const { x, y } = coordsOf(idx - 1);
-      const bg = cellBg(x, y);
+  const idx = base + c;
+  const p = board.getAtIndex(idx);
 
-      if (!p) {
-        // faint grid dots on top of background
-        cells.push(`${bg}${BG_GRIDDOT}· ${RESET}`);
-      } else {
-        const d = unpackPiece(p)!;
-        const fg = d.owner === Owner.Host ? FG_HOST : FG_GUEST;
-        const sym = symOf(d.type);
-        cells.push(`${bg}${fg}${BOLD}${sym}${RESET}`);
-      }
-    }
+  // OLD (unsafe):
+  // const { x, y } = coordsOf(idx - 1);
 
+  // NEW (safe):
+  const xy = coordsOf(idx - 1) as { x: number; y: number } | undefined;
+  if (!xy) {
+    // If the coords table doesn’t have this index, render a neutral cell and continue
+    cells.push(`${BG_NEUTRAL}${DIM}· ${RESET}`);
+    continue;
+  }
+  const { x, y } = xy;
+
+  const bg = cellBg(x, y);
+  if (!p) {
+    cells.push(`${bg}${BG_GRIDDOT}· ${RESET}`);
+  } else {
+    const d = unpackPiece(p)!;
+    const fg = d.owner === Owner.Host ? FG_HOST : FG_GUEST;
+    const sym = symOf(d.type);
+    cells.push(`${bg}${fg}${BOLD}${sym}${RESET}`);
+  }
+}
     const boardLine = padLeft + cells.join("") + padLeft;
     const sideLine = sidebar[sideIdx] ?? "";
     lines.push(boardLine + sidebarPad + sideLine);
