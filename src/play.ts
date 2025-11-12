@@ -21,6 +21,26 @@ const FIRST: Side = (args.first === "guest" ? "guest" : "host");
 const DEPTH = Math.max(1, parseInt(String(args.depth ?? "3"), 10));
 const TIMEMS = args.time ? Math.max(1, parseInt(String(args.time), 10)) : undefined;
 
+function isMoveSane(board: Board, mv: any): boolean {
+  const N = (board as any).size1Based ?? 249;
+  const inRange = (i: any) => Number.isInteger(i) && i >= 1 && i <= N;
+
+  switch (mv?.kind) {
+    case "arrange":
+      if (!inRange(mv.from)) return false;
+      if (!Array.isArray(mv.path) || mv.path.length === 0) return false;
+      return mv.path.every(inRange);
+    case "wheel":
+      return inRange(mv.center);
+    case "boatFlower":
+      return inRange(mv.boat) && inRange(mv.from) && inRange(mv.to);
+    case "boatAccent":
+      return inRange(mv.boat) && inRange(mv.target);
+    default:
+      return false;
+  }
+}
+
 // ---------- Helpers ----------
 function idx1(x: number, y: number): number {
   const i0 = indexOf(x, y);
@@ -78,22 +98,28 @@ function boardToAscii(b: Board): string {
   return lines.join("\n");
 }
 
+function safeXY(idx1: number): string {
+  try {
+    if (!Number.isInteger(idx1) || idx1 < 1) return "<?>"; // 1-based guard
+    const { x, y } = coordsOf(idx1 - 1);
+    return `${x},${y}`;
+  } catch {
+    return "<?>"; // fall back if out of board
+  }
+}
+
 function printMove(m: any) {
   if (!m) { console.log("Engine: no legal move."); return; }
   if (m.kind === "arrange") {
-    const fromXY = coordsOf(m.from - 1);
-    const toXY = coordsOf(m.path[m.path.length - 1] - 1);
-    console.log(`Engine → ARRANGE ${fromXY.x},${fromXY.y} -> ${toXY.x},${toXY.y} (steps=${m.path.length})`);
+    const from = safeXY(m.from);
+    const dest = Array.isArray(m.path) && m.path.length > 0 ? safeXY(m.path[m.path.length - 1]) : "<?>"
+    console.log(`Engine → ARRANGE ${from} -> ${dest}${Array.isArray(m.path) ? ` (steps=${m.path.length})` : ""}`);
   } else if (m.kind === "wheel") {
-    const at = coordsOf(m.center - 1);
-    console.log(`Engine → WHEEL at ${at.x},${at.y}`);
+    console.log(`Engine → WHEEL at ${safeXY(m.center)}`);
   } else if (m.kind === "boatFlower") {
-    const s = coordsOf(m.from - 1);
-    const t = coordsOf(m.to - 1);
-    console.log(`Engine → BOAT-FLOWER ${s.x},${s.y} -> ${t.x},${t.y} (boat idx=${m.boat})`);
+    console.log(`Engine → BOAT-FLOWER ${safeXY(m.from)} -> ${safeXY(m.to)} (boat idx=${m.boat})`);
   } else if (m.kind === "boatAccent") {
-    const t = coordsOf(m.target - 1);
-    console.log(`Engine → BOAT-ACCENT target ${t.x},${t.y} (boat idx=${m.boat})`);
+    console.log(`Engine → BOAT-ACCENT target ${safeXY(m.target)} (boat idx=${m.boat})`);
   } else {
     console.log("Engine →", m);
   }
@@ -161,21 +187,31 @@ async function main() {
     if (line.toLowerCase() === "print") { console.log(boardToAscii(b)); continue; }
 
     try {
-      if (line.toLowerCase().startsWith("engine")) {
-        // force engine to move now
-        const t0 = performance.now();
-        const mv = pickBestMove(b, toMove, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
-        const t1 = performance.now();
-        printMove(mv);
-        if (mv) {
-          const nb = applyAnyMove(b, toMove, mv);
-          copyBoard(b, nb);
-          toMove = other(toMove);
-        }
-        console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
-        console.log(boardToAscii(b));
-        continue;
-      }
+if (line.toLowerCase().startsWith("engine")) {
+  const t0 = performance.now();
+  const mv = pickBestMove(b, toMove, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
+  const t1 = performance.now();
+
+  if (!mv) {
+    console.log("Engine: no move.");
+  } else if (!isMoveSane(b, mv)) {
+    console.log("Engine produced an invalid/unsane move (defensive check). Skipping.");
+    printMove(mv); // still show what it tried to do
+  } else {
+    printMove(mv);
+    try {
+      const nb = applyAnyMove(b, toMove, mv);
+      copyBoard(b, nb);
+      toMove = toMove === "host" ? "guest" : "host";
+    } catch (e: any) {
+      console.log(`Apply failed: ${e?.message ?? e}. Skipping.`);
+    }
+  }
+
+  console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
+  console.log(boardToAscii(b));
+  continue;
+}
 
       if (line.toLowerCase().startsWith("arr ")) {
         // arr x,y -> a,b; c,d; ...
