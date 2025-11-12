@@ -317,9 +317,10 @@ export function applyPlannedArrange(board: Board, mv: PlannedArrange): Board {
 }
 
 // ---------- Search (negamax on Arrange moves) ----------
-export function pickBestMove(board: Board, side: Side, depth = 2): PlannedArrange | null {
-  const moves = generateLegalArrangeMoves(board, side);
-  if (moves.length === 0) return null;
+export function pickBestMove(board: import("./board").Board, side: Side, depth: number, opts?: { maxMs?: number }) {
+  const move = searchIterativeDeepening(board, side, depth, opts?.maxMs);
+  return move || null;
+}
 
   let bestScore = -Infinity;
   let best: PlannedArrange | null = null;
