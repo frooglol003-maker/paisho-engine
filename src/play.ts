@@ -24,7 +24,7 @@ const DEPTH = Math.max(1, parseInt(String(args.depth ?? "3"), 10));
 const TIMEMS = args.time ? Math.max(1, parseInt(String(args.time), 10)) : undefined;
 
 // ---------- Board geometry helpers ----------
-const BOARD_RADIUS = 8; // y ∈ [-8..8], x ∈ [-8..8]
+const BOARD_RADIUS = 8; // coords x,y ∈ [-8..8]
 
 function idx1(x: number, y: number): number {
   const i0 = indexOf(x, y);
@@ -36,6 +36,16 @@ function xyFromString(s: string): { x: number; y: number } {
   const m = s.trim().match(/^(-?\d+)\s*,\s*(-?\d+)$/);
   if (!m) throw new Error(`Bad coord: "${s}" (use x,y)`);
   return { x: parseInt(m[1], 10), y: parseInt(m[2], 10) };
+}
+
+function parsePathList(s: string): number[] {
+  // "x1,y1; x2,y2; ..."
+  const parts = s.split(";").map(p => p.trim()).filter(Boolean);
+  if (parts.length === 0) throw new Error("Empty path");
+  return parts.map(p => {
+    const { x, y } = xyFromString(p);
+    return idx1(x, y);
+  });
 }
 
 // ---------- Pools & counting ----------
@@ -249,7 +259,7 @@ function countsToLines(label: string, m: CountMap, color: string): string[] {
   return rows;
 }
 
-// ---------- Board renderer (flipped so y=+8 is at top) ----------
+// ---------- Board renderer (flipped so y=+8 is at top visually) ----------
 function boardWithSidebar(board: Board): string {
   const widths = [9,11,13,15, 17,17,17,17,17,17,17,17,17, 15,13,11,9];
   const rowStarts: number[] = [];
@@ -286,7 +296,7 @@ function boardWithSidebar(board: Board): string {
 
   // Flip vertically: start from highest-y row
   for (let vr = 0; vr < widths.length; vr++) {
-    const r = widths.length - 1 - vr;  // reversed row index
+    const r = widths.length - 1 - vr;
     const w = widths[r];
     const rowBase = rowStarts[r];
 
@@ -352,6 +362,13 @@ function applyAnyMove(board: Board, side: Side, m: any): Board {
   }
 }
 
+function copyBoard(dst: Board, src: Board) {
+  const N = (src as any).size1Based ?? 249;
+  for (let i = 1; i <= N; i++) {
+    dst.setAtIndex(i, src.getAtIndex(i) || 0);
+  }
+}
+
 // ---------- Undo support ----------
 type HistoryEntry = { cells: number[]; toMove: Side };
 const history: HistoryEntry[] = [];
@@ -384,6 +401,7 @@ Commands:
                                TYPE: R3 R4 R5 W3 W4 W5 Lotus Orchid
   engine [host|guest|me|other] let engine move/plant (optionally pick side)
   arr x,y -> a,b; c,d; ...     arrange move with path
+                               (with a single destination, path is auto-built)
   wheel x,y                    rotate neighbors around wheel at x,y
   boatf boatX,boatY fromX,fromY -> toX,toY
   boata boatX,boatY targetX,targetY
@@ -393,6 +411,10 @@ Commands:
   help                         show this help
   quit
 `);
+}
+
+function other(side: Side): Side {
+  return side === "host" ? "guest" : "host";
 }
 
 // ---------- Main loop ----------
@@ -504,8 +526,8 @@ async function main() {
           printMove(mv);
           try {
             const nb = applyAnyMove(b, toMove, mv);
-            restoreBoard(b, snapshotBoard(nb));
-            toMove = toMove === "host" ? "guest" : "host";
+            copyBoard(b, nb);
+            toMove = other(toMove);
           } catch (e: any) {
             console.log(`Apply failed: ${e?.message ?? e}. Skipping.`);
             history.pop(); // rollback
@@ -516,7 +538,10 @@ async function main() {
         continue;
       }
 
-      // Arrange (with legality check + auto-expand single-dest Manhattan path)
+      // Arrange:
+      // - If you give multiple waypoints, we use them literally.
+      // - If you give a single destination, we auto-build a Manhattan path.
+      //   We try H-then-V, and if that hits a block, we try V-then-H.
       if (lower.startsWith("arr ")) {
         const m = line.slice(4).split("->");
         if (m.length !== 2) throw new Error("Use: arr x,y -> a,b; c,d; ...");
@@ -528,50 +553,81 @@ async function main() {
         const parts = rhs.split(";").map(p => p.trim()).filter(Boolean);
         if (parts.length === 0) throw new Error("Empty path");
 
-        const coords = parts.map(p => xyFromString(p));
-        let pathIdx: number[] = [];
+        let pathIdx: number[] | null = null;
+        let lastReason: string | undefined;
 
-        if (coords.length === 1) {
-          // QoL: single destination → build a shortest orthogonal (Manhattan) path
-          const dest = coords[0];
+        if (parts.length === 1) {
+          // --- single-destination QoL ---
+          const dest = xyFromString(parts[0]);
 
-          const totalSteps =
-            Math.abs(dest.x - fromCoord.x) + Math.abs(dest.y - fromCoord.y);
-          if (totalSteps === 0) {
-            throw new Error("Destination is same as source.");
+          const tryOrder = (horizontalFirst: boolean) => {
+            const coordPath: { x: number; y: number }[] = [];
+            let x = fromCoord.x;
+            let y = fromCoord.y;
+            const dx = Math.sign(dest.x - fromCoord.x);
+            const dy = Math.sign(dest.y - fromCoord.y);
+
+            if (horizontalFirst) {
+              while (x !== dest.x) {
+                x += dx;
+                coordPath.push({ x, y });
+              }
+              while (y !== dest.y) {
+                y += dy;
+                coordPath.push({ x, y });
+              }
+            } else {
+              while (y !== dest.y) {
+                y += dy;
+                coordPath.push({ x, y });
+              }
+              while (x !== dest.x) {
+                x += dx;
+                coordPath.push({ x, y });
+              }
+            }
+
+            const idxPath = coordPath.map(c => idx1(c.x, c.y));
+            const res = validateArrange(b, fromIdx, idxPath);
+            return { res, idxPath };
+          };
+
+          // Try horizontal-then-vertical first
+          let attempt = tryOrder(true);
+          if (attempt.res.ok) {
+            pathIdx = attempt.idxPath;
+          } else {
+            lastReason = attempt.res.reason;
+            // If blocked somewhere, try vertical-then-horizontal
+            const attempt2 = tryOrder(false);
+            if (attempt2.res.ok) {
+              pathIdx = attempt2.idxPath;
+            } else {
+              // keep the second reason if the first was undefined
+              if (!lastReason) lastReason = attempt2.res.reason;
+            }
           }
 
-          let x = fromCoord.x;
-          let y = fromCoord.y;
-          const sx = Math.sign(dest.x - fromCoord.x);
-          const sy = Math.sign(dest.y - fromCoord.y);
-
-          // horizontal leg
-          while (x !== dest.x) {
-            x += sx;
-            pathIdx.push(idx1(x, y));
-          }
-          // vertical leg
-          while (y !== dest.y) {
-            y += sy;
-            pathIdx.push(idx1(x, y));
+          if (!pathIdx) {
+            console.log(`Illegal arrange: ${lastReason ?? "invalid path"}`);
+            continue;
           }
         } else {
-          // Multiple waypoints: treat literally
+          // --- literal multi-waypoint path ---
+          const coords = parts.map(p => xyFromString(p));
           pathIdx = coords.map(({ x, y }) => idx1(x, y));
-        }
-
-        const res = validateArrange(b, fromIdx, pathIdx);
-        if (!res.ok) {
-          console.log(`Illegal arrange: ${res.reason ?? "invalid path"}`);
-          continue;
+          const res = validateArrange(b, fromIdx, pathIdx);
+          if (!res.ok) {
+            console.log(`Illegal arrange: ${res.reason ?? "invalid path"}`);
+            continue;
+          }
         }
 
         pushHistory(b, toMove);
         const mv = { kind: "arrange", from: fromIdx, path: pathIdx };
         const nb = applyAnyMove(b, toMove, mv);
-        restoreBoard(b, snapshotBoard(nb));
-        toMove = toMove === "host" ? "guest" : "host";
+        copyBoard(b, nb);
+        toMove = other(toMove);
         console.log(boardWithSidebar(b));
         continue;
       }
@@ -582,8 +638,8 @@ async function main() {
         pushHistory(b, toMove);
         const mv = { kind: "wheel", center: idx1(cxy.x, cxy.y) };
         const nb = applyAnyMove(b, toMove, mv);
-        restoreBoard(b, snapshotBoard(nb));
-        toMove = toMove === "host" ? "guest" : "host";
+        copyBoard(b, nb);
+        toMove = other(toMove);
         console.log(boardWithSidebar(b));
         continue;
       }
@@ -605,8 +661,8 @@ async function main() {
         };
         pushHistory(b, toMove);
         const nb = applyAnyMove(b, toMove, mv);
-        restoreBoard(b, snapshotBoard(nb));
-        toMove = toMove === "host" ? "guest" : "host";
+        copyBoard(b, nb);
+        toMove = other(toMove);
         console.log(boardWithSidebar(b));
         continue;
       }
@@ -625,8 +681,8 @@ async function main() {
         };
         pushHistory(b, toMove);
         const nb = applyAnyMove(b, toMove, mv);
-        restoreBoard(b, snapshotBoard(nb));
-        toMove = toMove === "host" ? "guest" : "host";
+        copyBoard(b, nb);
+        toMove = other(toMove);
         console.log(boardWithSidebar(b));
         continue;
       }
@@ -646,7 +702,7 @@ async function main() {
 
         const ownerSide: Side = owner === Owner.Host ? "host" : "guest";
         if (advance || ownerSide === toMove) {
-          toMove = toMove === "host" ? "guest" : "host";
+          toMove = other(toMove);
         }
         continue;
       }
