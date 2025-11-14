@@ -8,7 +8,6 @@ import { Board, unpackPiece, TypeId } from "./board";
 import {
   getPieceDescriptor,
   isClashPair,
-  harmoniousPair, // kept for clarity, but graph uses isHarmonyActivePair instead
   ownerHasBloomingLotus,
   getGardenType,
   isGateCoord,
@@ -76,7 +75,8 @@ export function detectAnyClash(board: Board): boolean {
   return false;
 }
 
-/* validateArrange: verify a path (list of 1-based indices) from fromIdx1 to final */
+/* ----- Arrange validation -------------------------------------------------- */
+
 export type ArrangeValidation = { ok: true } | { ok: false; reason: string };
 
 function isRedFlower(t: TypeId): boolean {
@@ -86,22 +86,25 @@ function isWhiteFlower(t: TypeId): boolean {
   return t === TypeId.W3 || t === TypeId.W4 || t === TypeId.W5;
 }
 
+/** Can a given piece type legally *stop* on (x,y)? */
 function canStopOnGarden(type: TypeId, x: number, y: number): boolean {
   const g = getGardenType(x, y); // "red" | "white" | "neutral"
 
   if (g === "neutral") return true;
 
+  // White flowers can’t stop in red; red flowers can’t stop in white.
   if (g === "red" && isWhiteFlower(type)) return false;
   if (g === "white" && isRedFlower(type)) return false;
 
-  // Lotus / Orchid / accents etc: currently allowed anywhere
+  // Lotus / Orchid / accents etc: currently allowed anywhere.
   return true;
 }
 
 /**
  * Validate an arrange path.
- * - Path must be 1-step orthogonal moves.
- * - You CANNOT pass through occupied intersections.
+ * - Path is a list of 1-based indices.
+ * - Each step must be 1-square orthogonal (no diagonals, no jumps).
+ * - You CANNOT pass through occupied intersections (including the final dest).
  * - You MAY pass through “wrong-color” gardens; only the FINAL
  *   destination’s garden color must be legal for the tile.
  */
@@ -115,17 +118,18 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
   const startPiece = unpackPiece(startPacked)!;
   const type = startPiece.type;
 
+  // Coords of the starting square (1-based → 0-based for coordsOf)
   let { x: px, y: py } = coordsOf(fromIdx - 1);
 
   for (let i = 0; i < path.length; i++) {
     const idx = path[i];
-    const { x, y } = coordsOf(idx - 1);
+    const { x, y } = coordsOf(idx - 1); // 1-based board index → 0-based coords index
     const isLast = (i === path.length - 1);
 
     const dx = x - px;
     const dy = y - py;
 
-    // must move orthogonally, 1 step at a time
+    // Must move orthogonally, one step at a time.
     if (dx !== 0 && dy !== 0) {
       return { ok: false, reason: "Arrange must move orthogonally (no diagonals)." };
     }
@@ -133,13 +137,13 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
       return { ok: false, reason: "Arrange must move in single-step increments." };
     }
 
-    // cannot pass THROUGH any occupied intersection
+    // Cannot pass THROUGH any occupied intersection (including final).
     const occupant = board.getAtIndex(idx);
     if (occupant) {
       return { ok: false, reason: `blocked at intermediate ${idx}` };
     }
 
-    // garden-color legality ONLY on the final landing intersection
+    // Garden-color legality ONLY on the final landing intersection.
     if (isLast && !canStopOnGarden(type, x, y)) {
       return { ok: false, reason: "cannot stop on that garden" };
     }
@@ -150,6 +154,8 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
 
   return { ok: true };
 }
+
+/* ----- Harmony graph & rings ---------------------------------------------- */
 
 /* Build harmony graph and detect rings.
    Nodes: blooming basic tiles;
@@ -235,7 +241,8 @@ function cycleEnclosesOrigin(cycle: number[]): boolean {
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
     const xi = pts[i].x, yi = pts[i].y;
     const xj = pts[j].x, yj = pts[j].y;
-    const intersect = ((yi > 0) !== (yj > 0)) &&
+    const intersect =
+      ((yi > 0) !== (yj > 0)) &&
       (0 < (xj - xi) * (0 - yi) / ((yj - yi) || Number.EPSILON) + xi);
     if (intersect) inside = !inside;
   }
