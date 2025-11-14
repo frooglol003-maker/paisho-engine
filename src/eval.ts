@@ -1,10 +1,9 @@
 // src/eval.ts
-// Phase-aware position evaluator for Pai Sho.
+// Phase-aware position evaluator for Pai Sho (no mobility term for speed).
 
 import { Board, unpackPiece, TypeId } from "./board";
 import { coordsOf } from "./coords";
 import { buildHarmonyGraph } from "./move";
-import { generateLegalArrangeMoves } from "./engine";
 
 type Pov = "host" | "guest";
 
@@ -90,16 +89,7 @@ function centerCount(board: Board): { host: number; guest: number } {
   return { host, guest };
 }
 
-// Mobility = how many arrange moves you have
-function mobility(board: Board): { host: number; guest: number } {
-  const hostMoves = generateLegalArrangeMoves(board, "host").length;
-  const guestMoves = generateLegalArrangeMoves(board, "guest").length;
-  return { host: hostMoves, guest: guestMoves };
-}
-
 // --- Game phase: 0 = pure opening, 1 = full late game ---
-// You said: starts at 0 pieces, can go up to ~40.
-// We'll just map total piece count linearly into [0,1] with a cap.
 function gamePhase(board: Board): number {
   const pc = pieceCount(board).total;
   const maxPieces = 40; // tweak if your actual max differs
@@ -109,33 +99,20 @@ function gamePhase(board: Board): number {
 
 // --- Feature vector type ---
 interface Features {
-  materialDiff: number;    // host - guest (weighted by MATERIAL)
-  pieceCountDiff: number;  // hostPieces - guestPieces
-  harmonyDegDiff: number;  // sum of harmony edges
-  centerDiff: number;      // central presence
-  mobilityDiff: number;    // arrange move count
+  materialDiff:   number; // host - guest (weighted by MATERIAL)
+  pieceCountDiff: number; // hostPieces - guestPieces
+  harmonyDegDiff: number; // sum of harmony edges
+  centerDiff:     number; // central presence
 }
 
 // --- Weight sets: opening vs endgame ---
-// These are hand-tuned to match your priorities:
-//
-// Opening (phase ~0):
-//  - Big on "get pieces out" (pieceCountDiff)
-//  - Big on harmonyDeg (start forming patterns ASAP)
-//  - Some center control / development
-//  - Material is less important (you can't really be "down" material yet)
-// Endgame (phase ~1):
-//  - Harmony still very important (it’s scoring)
-//  - Material matters more
-//  - PieceCountDiff matters a bit (more threats / presence)
-//  - Center & mobility matter less
-//
+// Opening (phase ~0): push planting + harmonies + development.
+// Endgame (phase ~1): harmonies + material dominate.
 const OPENING_WEIGHTS: Features = {
   materialDiff:   0.4,
   pieceCountDiff: 1.8,
   harmonyDegDiff: 2.5,
   centerDiff:     1.2,
-  mobilityDiff:   0.3,
 };
 
 const ENDGAME_WEIGHTS: Features = {
@@ -143,7 +120,6 @@ const ENDGAME_WEIGHTS: Features = {
   pieceCountDiff: 0.7,
   harmonyDegDiff: 3.2,
   centerDiff:     0.4,
-  mobilityDiff:   0.1,
 };
 
 function lerp(a: number, b: number, t: number): number {
@@ -156,7 +132,6 @@ function blendedWeights(phase: number): Features {
     pieceCountDiff: lerp(OPENING_WEIGHTS.pieceCountDiff, ENDGAME_WEIGHTS.pieceCountDiff, phase),
     harmonyDegDiff: lerp(OPENING_WEIGHTS.harmonyDegDiff, ENDGAME_WEIGHTS.harmonyDegDiff, phase),
     centerDiff:     lerp(OPENING_WEIGHTS.centerDiff,     ENDGAME_WEIGHTS.centerDiff,     phase),
-    mobilityDiff:   lerp(OPENING_WEIGHTS.mobilityDiff,   ENDGAME_WEIGHTS.mobilityDiff,   phase),
   };
 }
 
@@ -169,25 +144,22 @@ export function evaluate(board: Board, pov: Pov): number {
   const pc = pieceCount(board);
   const h  = harmonyDeg(board);
   const c  = centerCount(board);
-  const mo = mobility(board);
 
   const feats: Features = {
     materialDiff:   m.host  - m.guest,
     pieceCountDiff: pc.host - pc.guest,
     harmonyDegDiff: h.host  - h.guest,
     centerDiff:     c.host  - c.guest,
-    mobilityDiff:   mo.host - mo.guest,
   };
 
-  const phase = gamePhase(board);           // 0 → opening, 1 → late
+  const phase = gamePhase(board); // 0 → opening, 1 → late
   const W = blendedWeights(phase);
 
   const raw =
     W.materialDiff   * feats.materialDiff   +
     W.pieceCountDiff * feats.pieceCountDiff +
     W.harmonyDegDiff * feats.harmonyDegDiff +
-    W.centerDiff     * feats.centerDiff     +
-    W.mobilityDiff   * feats.mobilityDiff;
+    W.centerDiff     * feats.centerDiff;
 
   return pov === "host" ? raw : -raw;
 }
