@@ -38,16 +38,6 @@ function xyFromString(s: string): { x: number; y: number } {
   return { x: parseInt(m[1], 10), y: parseInt(m[2], 10) };
 }
 
-function parsePathList(s: string): number[] {
-  // "x1,y1; x2,y2; ..."
-  const parts = s.split(";").map(p => p.trim()).filter(Boolean);
-  if (parts.length === 0) throw new Error("Empty path");
-  return parts.map(p => {
-    const { x, y } = xyFromString(p);
-    return idx1(x, y);
-  });
-}
-
 // ---------- Pools & counting ----------
 type CountMap = Record<string, number>;
 const PIECE_KEYS: [TypeId, string][] = [
@@ -526,9 +516,7 @@ async function main() {
         continue;
       }
 
-      // Arrange (with legality check)
-            // Arrange (with legality check + auto-expand straight paths)
-            // Arrange (with legality check + auto-expand single-dest Manhattan path)
+      // Arrange (with legality check + auto-expand single-dest Manhattan path)
       if (lower.startsWith("arr ")) {
         const m = line.slice(4).split("->");
         if (m.length !== 2) throw new Error("Use: arr x,y -> a,b; c,d; ...");
@@ -572,20 +560,6 @@ async function main() {
           // Multiple waypoints: treat literally
           pathIdx = coords.map(({ x, y }) => idx1(x, y));
         }
-
-        const res = validateArrange(b, fromIdx, pathIdx);
-        if (!res.ok) {
-          console.log(`Illegal arrange: ${res.reason ?? "invalid path"}`);
-          continue;
-        }
-
-        const mv = { kind: "arrange", from: fromIdx, path: pathIdx };
-        const nb = applyAnyMove(b, toMove, mv);
-        copyBoard(b, nb);
-        toMove = toMove === "host" ? "guest" : "host";
-        console.log(boardWithSidebar(b));
-        continue;
-      }
 
         const res = validateArrange(b, fromIdx, pathIdx);
         if (!res.ok) {
