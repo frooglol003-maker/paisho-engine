@@ -6,6 +6,7 @@ import { Board, TypeId, Owner, packPiece, unpackPiece } from "./board";
 import { coordsOf, indexOf } from "./coords";
 import { pickBestMove, applyPlannedArrange } from "./engine";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
+import { validateArrange } from "./move";
 
 // ---------- CLI ----------
 const args = Object.fromEntries(
@@ -23,7 +24,7 @@ const DEPTH = Math.max(1, parseInt(String(args.depth ?? "3"), 10));
 const TIMEMS = args.time ? Math.max(1, parseInt(String(args.time), 10)) : undefined;
 
 // ---------- Board geometry helpers ----------
-const BOARD_RADIUS = 8; // 17 rows → y ∈ [-8..8], x ∈ [-8..8] where valid
+const BOARD_RADIUS = 8; // y ∈ [-8..8], x ∈ [-8..8]
 
 function idx1(x: number, y: number): number {
   const i0 = indexOf(x, y);
@@ -57,8 +58,7 @@ const PIECE_KEYS: [TypeId, string][] = [
   [TypeId.Boat, "Boat"], [TypeId.Knotweed, "Knotweed"],
 ];
 
-// Standard starting pool for BOTH players:
-// R/W 3–5: 3 each; Lotus: 1; Orchid: 1; Accents: 1 each
+// Standard starting pool for BOTH players
 const STANDARD_POOL: CountMap = {
   R3: 3, R4: 3, R5: 3,
   W3: 3, W4: 3, W5: 3,
@@ -66,7 +66,7 @@ const STANDARD_POOL: CountMap = {
   Rock: 1, Wheel: 1, Boat: 1, Knotweed: 1,
 };
 
-// Live pools (can be customized later)
+// Live pools
 const POOL: { host: CountMap; guest: CountMap } = {
   host: { ...STANDARD_POOL },
   guest: { ...STANDARD_POOL },
@@ -130,11 +130,10 @@ const NORTH_GATE = { x: 0, y: +BOARD_RADIUS };
 const SOUTH_GATE = { x: 0, y: -BOARD_RADIUS };
 
 function gateFor(side: Side): { x: number; y: number } {
-  // By your rule: guest plants in SOUTH, host mirrors in NORTH.
+  // Guest plants in SOUTH, host in NORTH (canonical coords)
   return side === "guest" ? SOUTH_GATE : NORTH_GATE;
 }
 
-// Mirror placement for the other side (same type)
 function mirrorGateFor(side: Side): { x: number; y: number } {
   return side === "guest" ? NORTH_GATE : SOUTH_GATE;
 }
@@ -154,21 +153,16 @@ function plantOpening(b: Board, who: Side, type: TypeId) {
   if (b.getAtIndex(gi)) throw new Error(`Gate ${g.x},${g.y} occupied`);
   if (b.getAtIndex(mi)) throw new Error(`Mirror gate ${m.x},${m.y} occupied`);
 
-  // place who at own gate
   b.setAtIndex(gi, packPiece(type, who === "host" ? Owner.Host : Owner.Guest));
-  // mirror place opponent same type
   const otherOwner = who === "host" ? Owner.Guest : Owner.Host;
   b.setAtIndex(mi, packPiece(type, otherOwner));
 
-  // adjust pools (one tile of that type from each side)
   const key = PIECE_KEYS.find(([tid]) => tid === type)![1];
   POOL.host[key] = Math.max(0, (POOL.host[key] ?? 0) - 1);
   POOL.guest[key] = Math.max(0, (POOL.guest[key] ?? 0) - 1);
 }
 
-// If engine is asked to move on an empty board, choose a first plant from pool.
 function enginePickOpeningType(side: Side): TypeId | null {
-  // Simple preference order; tune later with your learned weights
   const order = ["R3","W3","R4","W4","R5","W5","Lotus","Orchid"] as const;
   for (const k of order) {
     if ((POOL[side][k] ?? 0) > 0) return toTypeId(k);
@@ -185,20 +179,15 @@ const DIM = ESC("2");
 const FG = (n: number) => ESC(`38;5;${n}`);
 const BG = (n: number) => ESC(`48;5;${n}`);
 
-// Piece/label colors
 const FG_HOST  = FG(39);   // blue-ish
 const FG_GUEST = FG(213);  // magenta-ish
+const GRID_DOT = FG(240);  // faint dot color
 
-// Board palette
 const BG_NEUTRAL = BG(137); // brown
 const BG_RED     = BG(166); // red
-const BG_WHITE   = BG(230); // white wood
-const BG_GATE    = BG(34);  // green gate highlight
+const BG_WHITE   = BG(230); // light wood
+const BG_GATE    = BG(34);  // green
 
-// Faint grid dot (foreground)
-const GRID_DOT = FG(240);
-
-// Gate checker (singular intersections)
 function isGatePoint(x: number, y: number): boolean {
   return (x === -8 && y === 0) ||
          (x ===  8 && y === 0) ||
@@ -206,27 +195,26 @@ function isGatePoint(x: number, y: number): boolean {
          (x ===  0 && y === -8);
 }
 
-// FINAL coloring formula
+// FINAL coloring formula (canonical coords)
 function cellBg(x: number, y: number): string {
-  // 0) special gates
-  if (isGatePoint(x, y)) return BG_GATE;
+  // 1) midlines are brown (overridden for gates)
+  if (x === 0 || y === 0) {
+    return isGatePoint(x, y) ? BG_GATE : BG_NEUTRAL;
+  }
 
-  // 1) midlines are brown
-  if (x === 0 || y === 0) return BG_NEUTRAL;
-
-  // 2) inner diamond by quadrants
+  // 2) inner diamond
   const manhattan = Math.abs(x) + Math.abs(y);
   if (manhattan < 7) {
     const q1 = x > 0 && y > 0;
     const q3 = x < 0 && y < 0;
-    return (q1 || q3) ? BG_RED : BG_WHITE; // Q1 & Q3 = red; Q2 & Q4 = white
+    if (q1 || q3) return BG_RED;   // quadrants 1 & 3
+    return BG_WHITE;               // quadrants 2 & 4
   }
 
-  // 3) outer ring is brown
+  // 3) outside diamond
   return BG_NEUTRAL;
 }
 
-// Compact 2-char symbols (fixed width)
 function symOf(type: TypeId): string {
   switch (type) {
     case TypeId.R3: return "R3";
@@ -247,8 +235,8 @@ function symOf(type: TypeId): string {
 
 function safeXY(idx1Val: number): string {
   try {
-    if (!Number.isInteger(idx1Val) || idx1Val < 1) return "<?>"; // 1-based guard
-    const xy = coordsOf(idx1Val - 1) as { x:number; y:number } | undefined;
+    if (!Number.isInteger(idx1Val) || idx1Val < 1) return "<?>"; 
+    const xy = coordsOf(idx1Val - 1) as { x: number; y: number } | undefined;
     if (!xy) return "<?>"; 
     return `${xy.x},${xy.y}`;
   } catch {
@@ -262,18 +250,26 @@ function countsToLines(label: string, m: CountMap, color: string): string[] {
   let any = false;
   for (const [, key] of PIECE_KEYS) {
     const v = m[key] ?? 0;
-    if (v !== 0) { any = true; rows.push(`${color}${key.padEnd(8)} ${BOLD}${String(v).padStart(2)}${RESET}`); }
+    if (v !== 0) {
+      any = true;
+      rows.push(`${color}${key.padEnd(8)} ${BOLD}${String(v).padStart(2)}${RESET}`);
+    }
   }
   if (!any) rows.push(`${DIM}(none)${RESET}`);
   return rows;
 }
 
+// ---------- Board renderer (flipped so y=+8 is at top) ----------
 function boardWithSidebar(board: Board): string {
   const widths = [9,11,13,15, 17,17,17,17,17,17,17,17,17, 15,13,11,9];
-  const lines: string[] = [];
+  const rowStarts: number[] = [];
   let base = 1;
+  for (let r = 0; r < widths.length; r++) {
+    rowStarts[r] = base;
+    base += widths[r];
+  }
 
-  // Side panel
+  // Side panel data
   const onBoard = countsOnBoard(board);
   const hostOn = countsToLines("HOST on board", onBoard.host, FG_HOST);
   const guestOn = countsToLines("GUEST on board", onBoard.guest, FG_GUEST);
@@ -284,27 +280,38 @@ function boardWithSidebar(board: Board): string {
   const guestRem = countsToLines("GUEST remaining", guestRemaining, FG_GUEST);
 
   const sidebar: string[] = [];
-  sidebar.push(...hostOn, "", ...guestOn, "", `${DIM}Pools (remaining)${RESET}`, ...hostRem, "", ...guestRem);
+  sidebar.push(
+    ...hostOn,
+    "",
+    ...guestOn,
+    "",
+    `${DIM}Pools (remaining)${RESET}`,
+    ...hostRem,
+    "",
+    ...guestRem
+  );
 
   const sidebarPad = "   ";
-  let sideIdx = 0;
+  const boardLines: string[] = [];
 
-  for (let r = 0; r < widths.length; r++) {
+  // Flip vertically: start from highest-y row
+  for (let vr = 0; vr < widths.length; vr++) {
+    const r = widths.length - 1 - vr;  // reversed row index
     const w = widths[r];
-    const padLeft = " ".repeat((17 - w));
+    const rowBase = rowStarts[r];
+
+    const padLeft = " ".repeat(17 - w);
     const cells: string[] = [];
 
     for (let c = 0; c < w; c++) {
-      const idx = base + c;
+      const idx = rowBase + c;
       const p = board.getAtIndex(idx);
-
       const xy = coordsOf(idx - 1) as { x: number; y: number } | undefined;
       if (!xy) {
         cells.push(`${BG_NEUTRAL}${DIM}· ${RESET}`);
         continue;
       }
       const { x, y } = xy;
-
       const bg = cellBg(x, y);
       if (!p) {
         cells.push(`${bg}${GRID_DOT}· ${RESET}`);
@@ -316,13 +323,14 @@ function boardWithSidebar(board: Board): string {
       }
     }
 
-    const boardLine = padLeft + cells.join("") + padLeft;
-    const sideLine = sidebar[sideIdx] ?? "";
-    lines.push(boardLine + sidebarPad + sideLine);
-    sideIdx++;
-    base += w;
+    boardLines.push(padLeft + cells.join("") + padLeft);
   }
 
+  const lines: string[] = [];
+  for (let i = 0; i < widths.length; i++) {
+    const sideLine = sidebar[i] ?? "";
+    lines.push(boardLines[i] + sidebarPad + sideLine);
+  }
   return lines.join("\n");
 }
 
@@ -350,30 +358,49 @@ function applyAnyMove(board: Board, side: Side, m: any): Board {
     case "wheel":       return applyWheel(board, side, m.center);
     case "boatFlower":  return applyBoatFlower(board, side, m.boat, m.from, m.to);
     case "boatAccent":  return applyBoatAccent(board, side, m.boat, m.target);
+    default: throw new Error(`unknown move kind: ${m.kind}`);
   }
-  throw new Error(`unknown move kind: ${m?.kind}`);
 }
 
-function copyBoard(dst: Board, src: Board) {
+// ---------- Undo support ----------
+type HistoryEntry = { cells: number[]; toMove: Side };
+const history: HistoryEntry[] = [];
+
+function snapshotBoard(src: Board): number[] {
   const N = (src as any).size1Based ?? 249;
+  const arr = new Array<number>(N + 1);
   for (let i = 1; i <= N; i++) {
-    dst.setAtIndex(i, src.getAtIndex(i) || 0);
+    arr[i] = src.getAtIndex(i) || 0;
+  }
+  return arr;
+}
+
+function restoreBoard(dst: Board, cells: number[]) {
+  const N = (dst as any).size1Based ?? 249;
+  for (let i = 1; i <= N; i++) {
+    dst.setAtIndex(i, cells[i] || 0);
   }
 }
 
+function pushHistory(board: Board, toMove: Side) {
+  history.push({ cells: snapshotBoard(board), toMove });
+}
+
+// ---------- Misc helpers ----------
 function help() {
   console.log(`
 Commands:
-  plant TYPE                    opening plant at your gate; mirrors opponent at opposite gate
-                                TYPE: R3 R4 R5 W3 W4 W5 Lotus Orchid
-  engine [host|guest|me|other]  let engine move/plant (optionally pick side)
-  arr x,y -> a,b; c,d; ...      arrange move with path
-  wheel x,y                     rotate neighbors around wheel at x,y
+  plant TYPE                   opening plant at your gate; mirrors opponent
+                               TYPE: R3 R4 R5 W3 W4 W5 Lotus Orchid
+  engine [host|guest|me|other] let engine move/plant (optionally pick side)
+  arr x,y -> a,b; c,d; ...     arrange move with path
+  wheel x,y                    rotate neighbors around wheel at x,y
   boatf boatX,boatY fromX,fromY -> toX,toY
   boata boatX,boatY targetX,targetY
-  place TYPE OWNER x,y [next]   force-place a tile (debug); add 'next' to hand turn
-  print                         redraw the board
-  help                          show this help
+  place TYPE OWNER x,y [next]  force-place a tile; 'next' hands over move
+  undo                         undo last move (engine or human)
+  print                        redraw the board
+  help                         show this help
   quit
 `);
 }
@@ -387,13 +414,15 @@ async function main() {
   console.log(boardWithSidebar(b));
   help();
 
-  // If engine is first (and the board is empty), auto-plant
+  // If engine is first and board is empty, let it plant the opening
   if (toMove !== HUMAN && isEmptyBoard(b)) {
     const t = enginePickOpeningType(toMove);
-    if (t) plantOpening(b, toMove, t);
+    if (t) {
+      pushHistory(b, toMove);
+      plantOpening(b, toMove, t);
+    }
     console.log(boardWithSidebar(b));
-    // Guest moves again after mirrored plant
-    if (toMove !== "guest") toMove = "guest";
+    if (toMove !== "guest") toMove = "guest"; // guest has second move
   }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
@@ -402,36 +431,55 @@ async function main() {
   while (true) {
     const line = (await ask(`${toMove === HUMAN ? "Your" : "Engine's"} turn [${toMove}] > `)).trim();
     if (!line) continue;
-    if (line.toLowerCase() === "quit") break;
-    if (line.toLowerCase() === "help") { help(); continue; }
-    if (line.toLowerCase() === "print") { console.log(boardWithSidebar(b)); continue; }
+
+    const lower = line.toLowerCase();
+    if (lower === "quit") break;
+    if (lower === "help") { help(); continue; }
+    if (lower === "print") { console.log(boardWithSidebar(b)); continue; }
+
+    // Undo
+    if (lower === "undo") {
+      const last = history.pop();
+      if (!last) {
+        console.log("Nothing to undo.");
+      } else {
+        restoreBoard(b, last.cells);
+        toMove = last.toMove;
+        console.log(boardWithSidebar(b));
+      }
+      continue;
+    }
 
     try {
-      // Opening: plant command
-      if (line.toLowerCase().startsWith("plant ")) {
+      // Opening: plant by hand
+      if (lower.startsWith("plant ")) {
         const typ = toTypeId(line.slice(6).trim());
-        const myGate = gateFor(toMove), mirrorGate = mirrorGateFor(toMove);
-        if (!isEmptyBoard(b) && (b.getAtIndex(idx1(myGate.x, myGate.y)) || b.getAtIndex(idx1(mirrorGate.x, mirrorGate.y)))) {
+        const g = gateFor(toMove), m = mirrorGateFor(toMove);
+        const gateOccupied = b.getAtIndex(idx1(g.x, g.y)) || b.getAtIndex(idx1(m.x, m.y));
+        if (!isEmptyBoard(b) && gateOccupied) {
           console.log("Planting phase seems over; use moves instead.");
         } else {
+          pushHistory(b, toMove);
           plantOpening(b, toMove, typ);
           console.log(boardWithSidebar(b));
-          // By rule: if host planted first (rare), hand turn to guest; guest otherwise keeps it
-          if (toMove === "host") toMove = "guest";
+          if (toMove === "host") toMove = "guest"; // guest gets the extra move
         }
         continue;
       }
 
-      // Engine action (plant if opening, else search)
-      // Usage: engine [host|guest|me|other]
-      const engMatch = line.toLowerCase().match(/^engine(?:\s+(host|guest|me|other))?$/);
+      // Engine (plant if opening, else search)
+      const engMatch = lower.match(/^engine(?:\s+(host|guest|me|other))?$/);
       if (engMatch) {
         const want = engMatch[1];
         let sideToPlay: Side = toMove;
 
-        if (want === "host" || want === "guest") sideToPlay = want as Side;
-        else if (want === "me") sideToPlay = HUMAN;
-        else if (want === "other") sideToPlay = HUMAN === "host" ? "guest" : "host";
+        if (want === "host" || want === "guest") {
+          sideToPlay = want as Side;
+        } else if (want === "me") {
+          sideToPlay = HUMAN;
+        } else if (want === "other") {
+          sideToPlay = HUMAN === "host" ? "guest" : "host";
+        }
 
         if (sideToPlay !== toMove) {
           console.log(`(switching turn to ${sideToPlay})`);
@@ -443,6 +491,7 @@ async function main() {
         if (isEmptyBoard(b)) {
           const t = enginePickOpeningType(toMove);
           if (t) {
+            pushHistory(b, toMove);
             plantOpening(b, toMove, t);
             const t1 = performance.now();
             const g = gateFor(toMove);
@@ -454,19 +503,22 @@ async function main() {
           }
         }
 
+        pushHistory(b, toMove);
         const mv = pickBestMove(b, toMove, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
         const t1 = performance.now();
 
         if (!mv) {
           console.log("Engine: no move.");
+          history.pop(); // no change
         } else {
           printMove(mv);
           try {
             const nb = applyAnyMove(b, toMove, mv);
-            copyBoard(b, nb);
+            restoreBoard(b, snapshotBoard(nb));
             toMove = toMove === "host" ? "guest" : "host";
           } catch (e: any) {
             console.log(`Apply failed: ${e?.message ?? e}. Skipping.`);
+            history.pop(); // rollback
           }
         }
         console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
@@ -474,32 +526,43 @@ async function main() {
         continue;
       }
 
-      // Normal moves
-      if (line.toLowerCase().startsWith("arr ")) {
+      // Arrange (with legality check)
+      if (lower.startsWith("arr ")) {
         const m = line.slice(4).split("->");
         if (m.length !== 2) throw new Error("Use: arr x,y -> a,b; c,d; ...");
         const from = xyFromString(m[0].trim());
         const path = parsePathList(m[1].trim());
-        const mv = { kind: "arrange", from: idx1(from.x, from.y), path };
+        const fromIdx = idx1(from.x, from.y);
+
+        const res = validateArrange(b, fromIdx, path);
+        if (!res.ok) {
+          console.log(`Illegal arrange: ${res.reason ?? "invalid path"}`);
+          continue;
+        }
+
+        pushHistory(b, toMove);
+        const mv = { kind: "arrange", from: fromIdx, path };
         const nb = applyAnyMove(b, toMove, mv);
-        copyBoard(b, nb);
+        restoreBoard(b, snapshotBoard(nb));
         toMove = toMove === "host" ? "guest" : "host";
         console.log(boardWithSidebar(b));
         continue;
       }
 
-      if (line.toLowerCase().startsWith("wheel ")) {
+      // Wheel
+      if (lower.startsWith("wheel ")) {
         const cxy = xyFromString(line.slice(6).trim());
+        pushHistory(b, toMove);
         const mv = { kind: "wheel", center: idx1(cxy.x, cxy.y) };
         const nb = applyAnyMove(b, toMove, mv);
-        copyBoard(b, nb);
+        restoreBoard(b, snapshotBoard(nb));
         toMove = toMove === "host" ? "guest" : "host";
         console.log(boardWithSidebar(b));
         continue;
       }
 
-      if (line.toLowerCase().startsWith("boatf ")) {
-        // boatf boatX,boatY fromX,fromY -> toX,toY
+      // Boat on flower
+      if (lower.startsWith("boatf ")) {
         const body = line.slice(6);
         const [lhs, rhs] = body.split("->").map(s => s.trim());
         if (!lhs || !rhs) throw new Error("Use: boatf boatX,boatY fromX,fromY -> toX,toY");
@@ -513,15 +576,16 @@ async function main() {
           from: idx1(from.x, from.y),
           to:   idx1(to.x, to.y)
         };
+        pushHistory(b, toMove);
         const nb = applyAnyMove(b, toMove, mv);
-        copyBoard(b, nb);
+        restoreBoard(b, snapshotBoard(nb));
         toMove = toMove === "host" ? "guest" : "host";
         console.log(boardWithSidebar(b));
         continue;
       }
 
-      if (line.toLowerCase().startsWith("boata ")) {
-        // boata boatX,boatY targetX,targetY
+      // Boat on accent
+      if (lower.startsWith("boata ")) {
         const body = line.slice(6).trim();
         const [bxy, txy] = body.split(/\s+/).map(s => s.trim());
         if (!bxy || !txy) throw new Error("Use: boata boatX,boatY targetX,targetY");
@@ -532,15 +596,16 @@ async function main() {
           boat: idx1(boat.x, boat.y),
           target: idx1(targ.x, targ.y),
         };
+        pushHistory(b, toMove);
         const nb = applyAnyMove(b, toMove, mv);
-        copyBoard(b, nb);
+        restoreBoard(b, snapshotBoard(nb));
         toMove = toMove === "host" ? "guest" : "host";
         console.log(boardWithSidebar(b));
         continue;
       }
 
-      if (line.toLowerCase().startsWith("place ")) {
-        // place TYPE OWNER x,y [next]
+      // Force place (debug)
+      if (lower.startsWith("place ")) {
         const parts = line.trim().split(/\s+/);
         if (parts.length < 4 || parts.length > 5) throw new Error("Use: place TYPE OWNER x,y [next]");
         const type = toTypeId(parts[1]);
@@ -548,6 +613,7 @@ async function main() {
         const { x, y } = xyFromString(parts[3]);
         const advance = (parts[4]?.toLowerCase() === "next");
 
+        pushHistory(b, toMove);
         b.setAtIndex(idx1(x, y), packPiece(type, owner));
         console.log(boardWithSidebar(b));
 
