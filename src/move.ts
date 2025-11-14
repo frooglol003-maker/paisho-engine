@@ -77,81 +77,76 @@ export function detectAnyClash(board: Board): boolean {
 }
 
 /* validateArrange: verify a path (list of 1-based indices) from fromIdx1 to final */
-export function validateArrange(
-  board: Board,
-  fromIdx1: number,
-  path: number[]
-): { ok: boolean; reason?: string } {
-  if (path.length === 0) return { ok: false, reason: "empty path" };
-  const packed = board.getAtIndex(fromIdx1);
-  if (!packed) return { ok: false, reason: "no piece at from index" };
-  const decoded = unpackPiece(packed)!;
-  if (
-    ![
-      TypeId.R3,
-      TypeId.R4,
-      TypeId.R5,
-      TypeId.W3,
-      TypeId.W4,
-      TypeId.W5,
-      TypeId.Lotus,
-      TypeId.Orchid,
-    ].includes(decoded.type)
-  ) {
-    return { ok: false, reason: "only flower tiles may arrange" };
+export type ArrangeValidation = { ok: true } | { ok: false; reason: string };
+
+function isRedFlower(t: TypeId): boolean {
+  return t === TypeId.R3 || t === TypeId.R4 || t === TypeId.R5;
+}
+function isWhiteFlower(t: TypeId): boolean {
+  return t === TypeId.W3 || t === TypeId.W4 || t === TypeId.W5;
+}
+
+function canStopOnGarden(type: TypeId, x: number, y: number): boolean {
+  const g = getGardenType(x, y); // "red" | "white" | "neutral"
+
+  if (g === "neutral") return true;
+
+  if (g === "red" && isWhiteFlower(type)) return false;
+  if (g === "white" && isRedFlower(type)) return false;
+
+  // Lotus / Orchid / accents etc: currently allowed anywhere
+  return true;
+}
+
+/**
+ * Validate an arrange path.
+ * - Path must be 1-step orthogonal moves.
+ * - You CANNOT pass through occupied intersections.
+ * - You MAY pass through “wrong-color” gardens; only the FINAL
+ *   destination’s garden color must be legal for the tile.
+ */
+export function validateArrange(board: Board, fromIdx: number, path: number[]): ArrangeValidation {
+  if (path.length === 0) {
+    return { ok: false, reason: "empty path" };
   }
 
-  // Orchid trap: cannot move if trapped
-  if (isTrappedByOrchid(board, fromIdx1)) {
-    return { ok: false, reason: "source flower is trapped by enemy orchid" };
-  }
+  const startPacked = board.getAtIndex(fromIdx);
+  if (!startPacked) return { ok: false, reason: "no tile at start" };
+  const startPiece = unpackPiece(startPacked)!;
+  const type = startPiece.type;
 
-  // build piece descriptor to get movement limit
-  const desc = getPieceDescriptor(board, fromIdx1);
-  let limit = 0;
-  if (desc.kind === "basic") limit = desc.number;
-  else if (desc.kind === "lotus") limit = 2;
-  else if (desc.kind === "orchid") limit = 6;
-  if (path.length > limit) return { ok: false, reason: `path too long: ${path.length} > ${limit}` };
+  let { x: px, y: py } = coordsOf(fromIdx - 1);
 
-  // step-by-step checks
-  let prev1 = fromIdx1; // 1-based
-  const seen = new Set<number>([fromIdx1]);
   for (let i = 0; i < path.length; i++) {
-    const cur1 = path[i]; // 1-based
-    const { x: px, y: py } = coordsOf(prev1 - 1);
-    const { x: cx, y: cy } = coordsOf(cur1 - 1);
-    if (Math.abs(px - cx) + Math.abs(py - cy) !== 1) {
-      return { ok: false, reason: `non-orthogonal step at step ${i}` };
+    const idx = path[i];
+    const { x, y } = coordsOf(idx - 1);
+    const isLast = (i === path.length - 1);
+
+    const dx = x - px;
+    const dy = y - py;
+
+    // must move orthogonally, 1 step at a time
+    if (dx !== 0 && dy !== 0) {
+      return { ok: false, reason: "Arrange must move orthogonally (no diagonals)." };
     }
-    // cannot revisit same square in a path (redundant)
-    if (seen.has(cur1)) return { ok: false, reason: "path revisits a square (redundant)" };
-    seen.add(cur1);
-    const occ = board.getAtIndex(cur1);
-    const isFinal = i === path.length - 1;
-    if (occ && !isFinal) return { ok: false, reason: `blocked at intermediate ${cur1}` };
-    if (isFinal && isGateCoord(cx, cy)) return { ok: false, reason: "cannot end move in a gate" };
-    // garden landing checks for basic
-    if (isFinal && desc.kind === "basic") {
-      const g = getGardenType(cx, cy);
-      if (g === "red" && desc.garden === "W") return { ok: false, reason: "cannot end in opposite garden (red)" };
-      if (g === "white" && desc.garden === "R") return { ok: false, reason: "cannot end in opposite garden (white)" };
+    if (Math.abs(dx) + Math.abs(dy) !== 1) {
+      return { ok: false, reason: "Arrange must move in single-step increments." };
     }
-    prev1 = cur1;
+
+    // cannot pass THROUGH any occupied intersection
+    const occupant = board.getAtIndex(idx);
+    if (occupant) {
+      return { ok: false, reason: `blocked at intermediate ${idx}` };
+    }
+
+    // garden-color legality ONLY on the final landing intersection
+    if (isLast && !canStopOnGarden(type, x, y)) {
+      return { ok: false, reason: "cannot stop on that garden" };
+    }
+
+    px = x;
+    py = y;
   }
-
-  // simulate final board and check clash
-  const final1 = path[path.length - 1];
-  const simulated = board.clone();
-  const destPacked = simulated.getAtIndex(final1);
-  // remove source
-  simulated.setAtIndex(fromIdx1, 0);
-  // remove captured (if any)
-  if (destPacked) simulated.setAtIndex(final1, 0);
-  // place mover
-  simulated.setAtIndex(final1, packed);
-
-  if (detectAnyClash(simulated)) return { ok: false, reason: "move would create a Clash" };
 
   return { ok: true };
 }
