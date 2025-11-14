@@ -528,6 +528,7 @@ async function main() {
 
       // Arrange (with legality check)
             // Arrange (with legality check + auto-expand straight paths)
+            // Arrange (with legality check + auto-expand single-dest Manhattan path)
       if (lower.startsWith("arr ")) {
         const m = line.slice(4).split("->");
         if (m.length !== 2) throw new Error("Use: arr x,y -> a,b; c,d; ...");
@@ -535,39 +536,56 @@ async function main() {
         const fromCoord = xyFromString(m[0].trim());
         const fromIdx = idx1(fromCoord.x, fromCoord.y);
 
-        // parse raw coord list on the RHS
         const rhs = m[1].trim();
         const parts = rhs.split(";").map(p => p.trim()).filter(Boolean);
         if (parts.length === 0) throw new Error("Empty path");
 
         const coords = parts.map(p => xyFromString(p));
-
         let pathIdx: number[] = [];
 
         if (coords.length === 1) {
-          // QoL: if there's a single dest and it's orthogonal, expand into 1-step path
+          // QoL: single destination → build a shortest orthogonal (Manhattan) path
           const dest = coords[0];
-          const dx = Math.sign(dest.x - fromCoord.x);
-          const dy = Math.sign(dest.y - fromCoord.y);
 
-          if (dx !== 0 && dy !== 0) {
-            throw new Error("Arrange must move orthogonally (no diagonals).");
-          }
-          if (dx === 0 && dy === 0) {
+          const totalSteps =
+            Math.abs(dest.x - fromCoord.x) + Math.abs(dest.y - fromCoord.y);
+          if (totalSteps === 0) {
             throw new Error("Destination is same as source.");
           }
 
           let x = fromCoord.x;
           let y = fromCoord.y;
-          while (x !== dest.x || y !== dest.y) {
-            x += dx;
-            y += dy;
+          const sx = Math.sign(dest.x - fromCoord.x);
+          const sy = Math.sign(dest.y - fromCoord.y);
+
+          // horizontal leg
+          while (x !== dest.x) {
+            x += sx;
+            pathIdx.push(idx1(x, y));
+          }
+          // vertical leg
+          while (y !== dest.y) {
+            y += sy;
             pathIdx.push(idx1(x, y));
           }
         } else {
-          // multiple waypoints: treat them literally
+          // Multiple waypoints: treat literally
           pathIdx = coords.map(({ x, y }) => idx1(x, y));
         }
+
+        const res = validateArrange(b, fromIdx, pathIdx);
+        if (!res.ok) {
+          console.log(`Illegal arrange: ${res.reason ?? "invalid path"}`);
+          continue;
+        }
+
+        const mv = { kind: "arrange", from: fromIdx, path: pathIdx };
+        const nb = applyAnyMove(b, toMove, mv);
+        copyBoard(b, nb);
+        toMove = toMove === "host" ? "guest" : "host";
+        console.log(boardWithSidebar(b));
+        continue;
+      }
 
         const res = validateArrange(b, fromIdx, pathIdx);
         if (!res.ok) {
