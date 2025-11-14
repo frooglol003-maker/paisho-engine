@@ -7,6 +7,7 @@ import { coordsOf, indexOf } from "./coords";
 import { pickBestMove, applyPlannedArrange } from "./engine";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
 import { validateArrange } from "./move";
+import { getGardenType } from "./rules";   // <-- add this line
 
 // ---------- CLI ----------
 const args = Object.fromEntries(
@@ -116,6 +117,14 @@ function toTypeId(name: string): TypeId {
     case "KNOTWEED": return TypeId.Knotweed;
     default: throw new Error(`Unknown type: ${name}`);
   }
+}
+
+function isWhiteFlower(t: TypeId): boolean {
+  return t === TypeId.W3 || t === TypeId.W4 || t === TypeId.W5;
+}
+
+function isRedFlower(t: TypeId): boolean {
+  return t === TypeId.R3 || t === TypeId.R4 || t === TypeId.R5;
 }
 
 function toOwner(s: string): Owner {
@@ -621,6 +630,26 @@ async function main() {
             console.log(`Illegal arrange: ${res.reason ?? "invalid path"}`);
             continue;
           }
+        }
+                // --- garden color legality: only final landing matters ---
+        const lastIdx = pathIdx[pathIdx.length - 1];
+        const lastXY  = coordsOf(lastIdx - 1);
+        const garden  = getGardenType(lastXY.x, lastXY.y); // "red" | "white" | undefined
+
+        const pieceVal = b.getAtIndex(fromIdx);
+        if (!pieceVal) {
+          console.log("Illegal arrange: no piece at source.");
+          continue;
+        }
+        const piece = unpackPiece(pieceVal)!;
+
+        if (isWhiteFlower(piece.type) && garden === "red") {
+          console.log("Illegal arrange: white flowers cannot land in the red garden.");
+          continue;
+        }
+        if (isRedFlower(piece.type) && garden === "white") {
+          console.log("Illegal arrange: red flowers cannot land in the white garden.");
+          continue;
         }
 
         pushHistory(b, toMove);
