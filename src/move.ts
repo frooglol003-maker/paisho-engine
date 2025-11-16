@@ -14,6 +14,38 @@ import {
   isHarmonyActivePair,
   isTrappedByOrchid,
 } from "./rules";
+// ----- Local garden geometry to match CLI board colours -----
+
+type GardenColour = "red" | "white" | "neutral";
+
+/**
+ * Gardens (must match the ASCII board in play.ts):
+ * - If x === 0 or y === 0 → neutral (midlines)
+ * - If |x| + |y| < 7:
+ *    - Quadrants 1 & 3 (x>0,y>0 or x<0,y<0) → red
+ *    - Quadrants 2 & 4 (x<0,y>0 or x>0,y<0) → white
+ * - Else → neutral
+ * - Gates (±8,0) and (0,±8) are treated as neutral for color rules.
+ */
+function gardenAt(x: number, y: number): GardenColour {
+  // Gates are neutral for landing rules
+  if (isGateCoord(x, y)) return "neutral";
+
+  // Midlines are neutral
+  if (x === 0 || y === 0) return "neutral";
+
+  const manhattan = Math.abs(x) + Math.abs(y);
+  if (manhattan >= 7) return "neutral";
+
+  const q1 = x > 0 && y > 0;
+  const q2 = x < 0 && y > 0;
+  const q3 = x < 0 && y < 0;
+  // q4 is the remaining case
+
+  if (q1 || q3) return "red";   // quadrants 1 & 3
+  if (q2)        return "white"; // quadrant 2
+  return "white";               // quadrant 4
+}
 
 /* Utility to compute orthogonal neighbors (returns 1-based indices). */
 function orthogonalNeighborsIdx(idx1: number): number[] {
@@ -86,17 +118,15 @@ function isWhiteFlower(t: TypeId): boolean {
   return t === TypeId.W3 || t === TypeId.W4 || t === TypeId.W5;
 }
 
-/** Can a given piece type legally *stop* on (x,y)? */
 function canStopOnGarden(type: TypeId, x: number, y: number): boolean {
-  const g = getGardenType(x, y); // "red" | "white" | "neutral"
+  const g = gardenAt(x, y); // use local geometry, not rules.getGardenType
 
   if (g === "neutral") return true;
 
-  // White flowers can’t stop in red; red flowers can’t stop in white.
   if (g === "red" && isWhiteFlower(type)) return false;
   if (g === "white" && isRedFlower(type)) return false;
 
-  // Lotus / Orchid / accents etc: currently allowed anywhere.
+  // Lotus / Orchid / accents can land anywhere
   return true;
 }
 
