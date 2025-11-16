@@ -37,17 +37,36 @@ export function intersectionType(x: number, y: number): IntersectionType {
   return "neutral";
 }
 
-export function getGardenType(
-  x: number,
-  y: number
-): "white" | "red" | "neutral" | "gate" {
-  const t = intersectionType(x, y);
-  if (t === "gate") return "gate";
-  if (t === "white") return "white";
-  if (t === "red") return "red";
-  return "neutral";
-}
 
+export type Garden = "red" | "white" | "neutral";
+
+// New diamond-based garden layout:
+// - Midlines (x === 0 or y === 0) are NEUTRAL.
+// - If |x| + |y| < 7:
+//     Quadrants 1 & 3 (x>0,y>0 and x<0,y<0)  → RED
+//     Quadrants 2 & 4 (x<0,y>0 and x>0,y<0)  → WHITE
+// - Everything else is NEUTRAL.
+export function getGardenType(x: number, y: number): Garden {
+  // Midlines are neutral; gates are handled separately via isGateCoord(...)
+  if (x === 0 || y === 0) {
+    return "neutral";
+  }
+
+  const manhattan = Math.abs(x) + Math.abs(y);
+  if (manhattan >= 7) {
+    return "neutral";
+  }
+
+  const inQ1 = x > 0 && y > 0;
+  const inQ3 = x < 0 && y < 0;
+
+  // Q1 & Q3 are red; Q2 & Q4 are white.
+  if (inQ1 || inQ3) {
+    return "red";
+  } else {
+    return "white";
+  }
+}
 // -----------------------------------------------------------------------------
 // Harmony ring cycle & helpers (R3→R4→R5→W3→W4→W5→back to R3)
 // -----------------------------------------------------------------------------
