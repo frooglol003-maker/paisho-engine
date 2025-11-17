@@ -6,7 +6,7 @@ import { Board, TypeId, Owner, packPiece, unpackPiece } from "./board";
 import { coordsOf, indexOf } from "./coords";
 import { pickBestMove, applyPlannedArrange } from "./engine";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
-import { validateArrange } from "./move";
+import { validateArrange, detectAnyClash } from "./move";
 import { getGardenType } from "./rules";   // <-- add this line
 
 // ---------- CLI ----------
@@ -362,13 +362,40 @@ function printMove(m: any) {
 }
 
 function applyAnyMove(board: Board, side: Side, m: any): Board {
-  switch (m.kind) {
-    case "arrange":     return applyPlannedArrange(board, { from: m.from, path: m.path });
-    case "wheel":       return applyWheel(board, side, m.center);
-    case "boatFlower":  return applyBoatFlower(board, side, m.boat, m.from, m.to);
-    case "boatAccent":  return applyBoatAccent(board, side, m.boat, m.target);
-    default: throw new Error(`unknown move kind: ${m.kind}`);
+  // Apply on a fresh Board so we can validate the result before committing.
+  const trial = new Board();
+  const N = (board as any).size1Based ?? 249;
+  for (let i = 1; i <= N; i++) {
+    trial.setAtIndex(i, board.getAtIndex(i) || 0);
   }
+
+  // Actually apply the move to the trial board.
+  let result: Board;
+  switch (m.kind) {
+    case "arrange":
+      result = applyPlannedArrange(trial, { from: m.from, path: m.path });
+      break;
+    case "wheel":
+      result = applyWheel(trial, side, m.center);
+      break;
+    case "boatFlower":
+      result = applyBoatFlower(trial, side, m.boat, m.from, m.to);
+      break;
+    case "boatAccent":
+      result = applyBoatAccent(trial, side, m.boat, m.target);
+      break;
+    default:
+      throw new Error(`unknown move kind: ${m.kind}`);
+  }
+
+  // === CLASH RULE ===
+  // If the resulting position contains *any* clash (standard or trap),
+  // treat the move as illegal.
+  if (detectAnyClash(result)) {
+    throw new Error("illegal: move produces a clash position");
+  }
+
+  return result;
 }
 
 function copyBoard(dst: Board, src: Board) {
