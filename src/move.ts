@@ -130,6 +130,21 @@ function canStopOnGarden(type: TypeId, x: number, y: number): boolean {
   return true;
 }
 
+function maxArrangeSteps(t: TypeId): number | null {
+  switch (t) {
+    case TypeId.R3:
+    case TypeId.W3: return 3;
+    case TypeId.R4:
+    case TypeId.W4: return 4;
+    case TypeId.R5:
+    case TypeId.W5: return 5;
+    default:
+      // Lotus, Orchid, Rock, Wheel, Boat, Knotweed:
+      // if they arrange at all, treat them as "no intrinsic limit"
+      return null;
+  }
+}
+
 /**
  * Validate an arrange path.
  * - Path is a list of 1-based indices.
@@ -143,12 +158,17 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
     return { ok: false, reason: "empty path" };
   }
 
-  const startPacked = board.getAtIndex(fromIdx);
+   const startPacked = board.getAtIndex(fromIdx);
   if (!startPacked) return { ok: false, reason: "no tile at start" };
   const startPiece = unpackPiece(startPacked)!;
   const type = startPiece.type;
 
-  // Coords of the starting square (1-based → 0-based for coordsOf)
+  // Enforce numbered flower move ranges (3/4/5)
+  const limit = maxArrangeSteps(type);
+  if (limit !== null && path.length > limit) {
+    return { ok: false, reason: `path too long for that tile (max ${limit})` };
+  }
+
   let { x: px, y: py } = coordsOf(fromIdx - 1);
 
   for (let i = 0; i < path.length; i++) {
