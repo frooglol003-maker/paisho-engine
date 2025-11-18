@@ -252,10 +252,13 @@ function orderMoves(
     if (mv.kind === "arrange") landingIdx1 = mv.path[mv.path.length - 1];
     else if (mv.kind === "boatFlower") landingIdx1 = mv.to;
 
-    let centerBias = 0;
+       let centerBias = 0;
     if (landingIdx1 > 0) {
-      const { x, y } = coordsOf(landingIdx1 - 1);
-      centerBias = -(Math.abs(x) + Math.abs(y));
+      const xy = coordsOf(landingIdx1 - 1) as any;
+      if (xy) {
+        const { x, y } = xy;
+        centerBias = -(Math.abs(x) + Math.abs(y));
+      }
     }
 
     let val = 0;
