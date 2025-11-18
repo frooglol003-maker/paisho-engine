@@ -49,7 +49,10 @@ function gardenAt(x: number, y: number): GardenColour {
 
 /* Utility to compute orthogonal neighbors (returns 1-based indices). */
 function orthogonalNeighborsIdx(idx1: number): number[] {
-  const { x, y } = coordsOf(idx1 - 1); // convert to 0-based for coords
+  const c = coordsOf(idx1 - 1) as { x: number; y: number } | undefined;
+  if (!c) return [];  // invalid index → no neighbors
+
+  const { x, y } = c;
   const candidates = [
     { x: x + 1, y },
     { x: x - 1, y },
@@ -57,13 +60,12 @@ function orthogonalNeighborsIdx(idx1: number): number[] {
     { x, y: y - 1 },
   ];
   const out: number[] = [];
-  for (const c of candidates) {
-    const i0 = indexOf(c.x, c.y); // 0-based
-    if (i0 !== -1) out.push(i0 + 1); // convert back to 1-based
+  for (const cand of candidates) {
+    const i0 = indexOf(cand.x, cand.y); // 0-based
+    if (i0 !== -1) out.push(i0 + 1);     // convert back to 1-based
   }
   return out;
 }
-
 /* lineOfSightClear: true if orthogonal straight segment from a to b has no pieces and no gates between them */
 export function lineOfSightClear(board: Board, aIdx1: number, bIdx1: number): boolean {
   const a = coordsOf(aIdx1 - 1) as any;
