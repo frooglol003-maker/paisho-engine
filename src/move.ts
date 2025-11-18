@@ -66,42 +66,55 @@ function orthogonalNeighborsIdx(idx1: number): number[] {
 
 /* lineOfSightClear: true if orthogonal straight segment from a to b has no pieces and no gates between them */
 export function lineOfSightClear(board: Board, aIdx1: number, bIdx1: number): boolean {
-  const a = coordsOf(aIdx1 - 1), b = coordsOf(bIdx1 - 1); // coords need 0-based
+  const a = coordsOf(aIdx1 - 1) as any;
+  const b = coordsOf(bIdx1 - 1) as any;
+  if (!a || !b) return false; // invalid indices, treat as blocked
+
   if (a.x !== b.x && a.y !== b.y) return false;
   const dx = Math.sign(b.x - a.x);
   const dy = Math.sign(b.y - a.y);
-  let cx = a.x + dx, cy = a.y + dy;
+
+  let cx = a.x + dx;
+  let cy = a.y + dy;
   while (!(cx === b.x && cy === b.y)) {
     const mid0 = indexOf(cx, cy); // 0-based
     if (mid0 === -1) return false; // off board
     const packed = board.getAtIndex(mid0 + 1); // board is 1-based
     if (packed) return false;
     if (isGateCoord(cx, cy)) return false;
-    cx += dx; cy += dy;
+    cx += dx;
+    cy += dy;
   }
   return true;
 }
 
 /* detectAnyClash: scan all basic blooming pairs aligned with LOS and test clash */
 export function detectAnyClash(board: Board): boolean {
-  const pts = generateValidPoints();
-  for (let i = 0; i < pts.length; i++) {
-    const aIdx1 = i + 1; // board index
+  const N = (board as any).size1Based ?? 249;
+
+  for (let aIdx1 = 1; aIdx1 <= N; aIdx1++) {
     const pA = getPieceDescriptor(board, aIdx1);
-    if (pA.kind !== "basic") continue;
-    if (!pA.blooming) continue;
-    for (let j = 0; j < pts.length; j++) {
-      if (i === j) continue;
-      const bIdx1 = j + 1;
+    if (pA.kind !== "basic" || !pA.blooming) continue;
+
+    const aC = coordsOf(aIdx1 - 1) as any;
+    if (!aC) continue;
+
+    for (let bIdx1 = 1; bIdx1 <= N; bIdx1++) {
+      if (bIdx1 === aIdx1) continue;
+
       const pB = getPieceDescriptor(board, bIdx1);
-      if (pB.kind !== "basic") continue;
-      if (!pB.blooming) continue;
+      if (pB.kind !== "basic" || !pB.blooming) continue;
+
+      const bC = coordsOf(bIdx1 - 1) as any;
+      if (!bC) continue;
 
       // same axis?
-      const aC = coordsOf(aIdx1 - 1), bC = coordsOf(bIdx1 - 1);
       if (aC.x !== bC.x && aC.y !== bC.y) continue;
       if (!lineOfSightClear(board, aIdx1, bIdx1)) continue;
-      if (isClashPair(pA.garden, pA.number, pB.garden, pB.number)) return true;
+
+      if (isClashPair(pA.garden, pA.number, pB.garden, pB.number)) {
+        return true;
+      }
     }
   }
   return false;
