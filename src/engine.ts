@@ -4,8 +4,13 @@
 import { performance } from "perf_hooks";
 import { coordsOf, NEIGHBORS4_1, NEIGHBORS8_1 } from "./coords";
 import { Board, unpackPiece, TypeId, Owner } from "./board";
-import { getPieceDescriptor, planWheelRotate, planBoatOnFlower, planBoatOnAccent } from "./rules";
-import { validateArrange } from "./move";
+import {
+  getPieceDescriptor,
+  planWheelRotate,
+  planBoatOnFlower,
+  planBoatOnAccent,
+} from "./rules";
+import { validateArrange, detectAnyClash } from "./move";
 import { evaluate } from "./eval";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
 import { Z_PIECE, Z_SIDE, xor64, key64 } from "./zobrist";
@@ -23,7 +28,9 @@ type _BoatFlowerPlan = { boat: number; from: number; to: number };
 type _BoatAccentPlan = { boat: number; target: number; remove: number[] };
 
 // ---------- Helpers ----------
-function opposite(s: Side): Side { return s === "host" ? "guest" : "host"; }
+function opposite(s: Side): Side {
+  return s === "host" ? "guest" : "host";
+}
 
 function belongsTo(packed: number | null, side: Side): boolean {
   if (!packed) return false;
@@ -47,17 +54,17 @@ function isType(board: Board, idx1: number, t: TypeId): boolean {
 
 // ---------- Search core (alpha–beta + ordering + TT + time limit) ----------
 type ArrangeMove = { kind: "arrange"; from: number; path: number[] };
-type WheelMove   = { kind: "wheel"; center: number };
-type BoatFlower  = { kind: "boatFlower"; boat: number; from: number; to: number };
-type BoatAccent  = { kind: "boatAccent"; boat: number; target: number };
+type WheelMove = { kind: "wheel"; center: number };
+type BoatFlower = { kind: "boatFlower"; boat: number; from: number; to: number };
+type BoatAccent = { kind: "boatAccent"; boat: number; target: number };
 type AnyMove = ArrangeMove | WheelMove | BoatFlower | BoatAccent;
 
 type Score = number;
 type TTFlag = "EXACT" | "LOWER" | "UPPER";
 
 interface TTEntry {
-  depth: number;      // remaining depth when stored
-  score: Score;       // score from side-to-move POV when stored
+  depth: number; // remaining depth when stored
+  score: Score; // score from side-to-move POV when stored
   flag: TTFlag;
   best?: AnyMove;
 }
@@ -69,7 +76,10 @@ function TT_set(key: string, val: TTEntry) {
   if (TT.size >= TT_CAP) {
     // simple aging: drop ~1/8 of entries
     let n = Math.floor(TT_CAP / 8);
-    for (const k of TT.keys()) { TT.delete(k); if (--n <= 0) break; }
+    for (const k of TT.keys()) {
+      TT.delete(k);
+      if (--n <= 0) break;
+    }
   }
   TT.set(key, val);
 }
@@ -90,12 +100,44 @@ function boardKey(board: Board, side: Side): string {
 
     let tIdx = 0;
     switch (type) {
-      case TypeId.R3: tIdx = 0; break; case TypeId.R4: tIdx = 1; break; case TypeId.R5: tIdx = 2; break;
-      case TypeId.W3: tIdx = 3; break; case TypeId.W4: tIdx = 4; break; case TypeId.W5: tIdx = 5; break;
-      case TypeId.Lotus: tIdx = 6; break; case TypeId.Orchid: tIdx = 7; break;
-      case TypeId.Rock: tIdx = 8; break; case TypeId.Wheel: tIdx = 9; break; case TypeId.Boat: tIdx = 10; break;
-      case TypeId.Knotweed: tIdx = 11; break;
-      default: continue; // Empty
+      case TypeId.R3:
+        tIdx = 0;
+        break;
+      case TypeId.R4:
+        tIdx = 1;
+        break;
+      case TypeId.R5:
+        tIdx = 2;
+        break;
+      case TypeId.W3:
+        tIdx = 3;
+        break;
+      case TypeId.W4:
+        tIdx = 4;
+        break;
+      case TypeId.W5:
+        tIdx = 5;
+        break;
+      case TypeId.Lotus:
+        tIdx = 6;
+        break;
+      case TypeId.Orchid:
+        tIdx = 7;
+        break;
+      case TypeId.Rock:
+        tIdx = 8;
+        break;
+      case TypeId.Wheel:
+        tIdx = 9;
+        break;
+      case TypeId.Boat:
+        tIdx = 10;
+        break;
+      case TypeId.Knotweed:
+        tIdx = 11;
+        break;
+      default:
+        continue; // Empty
     }
     const oIdx = owner === Owner.Host ? 0 : 1;
     h = xor64(h, Z_PIECE[i][tIdx][oIdx]);
@@ -109,7 +151,7 @@ export function applyPlannedArrange(board: Board, mv: PlannedArrange): Board {
   const final1 = mv.path[mv.path.length - 1];
   const cloned = board.clone();
   const piece = cloned.getAtIndex(mv.from);
-  const dest  = cloned.getAtIndex(final1);
+  const dest = cloned.getAtIndex(final1);
   cloned.setAtIndex(mv.from, 0);
   if (dest) cloned.setAtIndex(final1, 0);
   if (piece) cloned.setAtIndex(final1, piece);
@@ -120,18 +162,27 @@ export function applyPlannedArrange(board: Board, mv: PlannedArrange): Board {
 // Uses existing apply* helpers so we keep one source of truth.
 function applyMoveCloned(board: Board, side: Side, mv: AnyMove): Board {
   switch (mv.kind) {
-    case "arrange":     return applyPlannedArrange(board, { from: mv.from, path: mv.path });
-    case "wheel":       return applyWheel(board, side, mv.center);
-    case "boatFlower":  return applyBoatFlower(board, side, mv.boat, mv.from, mv.to);
-    case "boatAccent":  return applyBoatAccent(board, side, mv.boat, mv.target);
+    case "arrange":
+      return applyPlannedArrange(board, { from: mv.from, path: mv.path });
+    case "wheel":
+      return applyWheel(board, side, mv.center);
+    case "boatFlower":
+      return applyBoatFlower(board, side, mv.boat, mv.from, mv.to);
+    case "boatAccent":
+      return applyBoatAccent(board, side, mv.boat, mv.target);
   }
 }
 
 // --- killer moves + history (declare AFTER AnyMove is defined) ---
 const MAX_PLY = 128;
-const killers: (AnyMove | null)[][] = Array.from({ length: MAX_PLY }, () => [null, null]);
+const killers: (AnyMove | null)[][] = Array.from({ length: MAX_PLY }, () => [
+  null,
+  null,
+]);
 const history = new Map<string, number>();
-function histKey(mv: AnyMove) { return JSON.stringify(mv); }
+function histKey(mv: AnyMove) {
+  return JSON.stringify(mv);
+}
 
 // Generate all candidate moves (arrange + bonus). Bonus are deduped and pre-checked.
 function generateAllMoves(board: Board, side: Side): AnyMove[] {
@@ -149,19 +200,29 @@ function generateAllMoves(board: Board, side: Side): AnyMove[] {
       const key = JSON.stringify(mv);
       if (seen.has(key)) return;
       try {
-        void applyMoveCloned(board, side, mv);
+        const child = applyMoveCloned(board, side, mv);
+        // NEW: filter out moves that produce a clash position
+        if (detectAnyClash(child)) return;
         seen.add(key);
         moves.push(mv);
-      } catch { /* ignore unplayable bonus */ }
+      } catch {
+        /* ignore unplayable bonus */
+      }
     };
 
     // Wheel
     for (const c of generateWheelBonusMoves(board, side)) {
-      if (typeof c.center === "number") safePush({ kind: "wheel", center: c.center });
+      if (typeof c.center === "number")
+        safePush({ kind: "wheel", center: c.center });
     }
     // Boat on flower
     for (const b of generateBoatFlowerBonusMoves(board, side)) {
-      if (typeof b.boat === "number" && typeof b.from === "number" && typeof b.to === "number" && b.from !== b.to) {
+      if (
+        typeof b.boat === "number" &&
+        typeof b.from === "number" &&
+        typeof b.to === "number" &&
+        b.from !== b.to
+      ) {
         safePush({ kind: "boatFlower", boat: b.boat, from: b.from, to: b.to });
       }
     }
@@ -178,9 +239,15 @@ function generateAllMoves(board: Board, side: Side): AnyMove[] {
 } // <<< close generateAllMoves
 
 // Move ordering heuristic: shallow eval of child + center bias + short paths + killer/history.
-function orderMoves(board: Board, side: Side, moves: AnyMove[], ply = 0): AnyMove[] {
-  const k1 = killers[ply]?.[0], k2 = killers[ply]?.[1];
-  const scored = moves.map(mv => {
+function orderMoves(
+  board: Board,
+  side: Side,
+  moves: AnyMove[],
+  ply = 0
+): AnyMove[] {
+  const k1 = killers[ply]?.[0],
+    k2 = killers[ply]?.[1];
+  const scored = moves.map((mv) => {
     let landingIdx1 = -1;
     if (mv.kind === "arrange") landingIdx1 = mv.path[mv.path.length - 1];
     else if (mv.kind === "boatFlower") landingIdx1 = mv.to;
@@ -192,21 +259,34 @@ function orderMoves(board: Board, side: Side, moves: AnyMove[], ply = 0): AnyMov
     }
 
     let val = 0;
-    try { val = evaluate(applyMoveCloned(board, side, mv), side); } catch { val = -1e9; }
+    try {
+      val = evaluate(applyMoveCloned(board, side, mv), side);
+    } catch {
+      val = -1e9;
+    }
 
     const shortPathBias = mv.kind === "arrange" ? -mv.path.length : 0;
-    const killerBonus = (k1 && JSON.stringify(k1) === JSON.stringify(mv) ? 5000 :
-                        (k2 && JSON.stringify(k2) === JSON.stringify(mv) ? 3000 : 0));
-    const histBonus = (history.get(histKey(mv)) ?? 0);
+    const killerBonus =
+      k1 && JSON.stringify(k1) === JSON.stringify(mv)
+        ? 5000
+        : k2 && JSON.stringify(k2) === JSON.stringify(mv)
+        ? 3000
+        : 0;
+    const histBonus = history.get(histKey(mv)) ?? 0;
 
-    return { mv, key: val * 1000 + centerBias * 10 + shortPathBias + killerBonus + histBonus };
+    return {
+      mv,
+      key: val * 1000 + centerBias * 10 + shortPathBias + killerBonus + histBonus,
+    };
   });
 
   scored.sort((a, b) => b.key - a.key);
-  return scored.map(s => s.mv);
+  return scored.map((s) => s.mv);
 }
 
-function other(side: Side): Side { return side === "host" ? "guest" : "host"; }
+function other(side: Side): Side {
+  return side === "host" ? "guest" : "host";
+}
 
 interface SearchOpts {
   maxDepth: number;
@@ -222,7 +302,7 @@ function searchAlphaBeta(
   startMs: number,
   opts: SearchOpts,
   ply = 0
-): { score: Score, best?: AnyMove } {
+): { score: Score; best?: AnyMove } {
   // node count
   searchStats.nodes++;
 
@@ -252,8 +332,11 @@ function searchAlphaBeta(
   // Try TT's best move first if present
   if (tt?.best) {
     const k = JSON.stringify(tt.best);
-    const i = moves.findIndex(m => JSON.stringify(m) === k);
-    if (i > 0) { const [mv] = moves.splice(i, 1); moves.unshift(mv); }
+    const i = moves.findIndex((m) => JSON.stringify(m) === k);
+    if (i > 0) {
+      const [mv] = moves.splice(i, 1);
+      moves.unshift(mv);
+    }
   }
 
   if (moves.length === 0) {
@@ -266,19 +349,38 @@ function searchAlphaBeta(
 
   for (const mv of moves) {
     let child: Board;
-    try { child = applyMoveCloned(board, side, mv); }
-    catch { continue; }
+    try {
+      child = applyMoveCloned(board, side, mv);
+    } catch {
+      continue;
+    }
+
+    // moves passed through generateAllMoves already have clash filtered,
+    // so we don't re-check detectAnyClash here for speed.
 
     // Late Move Reductions: reduce depth for unpromising late moves
     let newDepth = depth - 1;
     const idxInList = moves.indexOf(mv);
-    const isQuiet = (mv.kind === "arrange"); // wheel/boat are tactical; search full depth
-    if (depth >= 3 && isQuiet && idxInList >= 6) newDepth = Math.max(1, newDepth - 1);
+    const isQuiet = mv.kind === "arrange"; // wheel/boat are tactical; search full depth
+    if (depth >= 3 && isQuiet && idxInList >= 6)
+      newDepth = Math.max(1, newDepth - 1);
 
-    const res = searchAlphaBeta(child, other(side), newDepth, -beta, -localAlpha, startMs, opts, ply + 1);
+    const res = searchAlphaBeta(
+      child,
+      other(side),
+      newDepth,
+      -beta,
+      -localAlpha,
+      startMs,
+      opts,
+      ply + 1
+    );
     const v = -res.score;
 
-    if (v > value) { value = v; best = mv; }
+    if (v > value) {
+      value = v;
+      best = mv;
+    }
     if (v > localAlpha) localAlpha = v;
 
     if (localAlpha >= beta) {
@@ -324,15 +426,23 @@ function searchIterativeDeepening(
   let guess = 0;
 
   for (let d = 1; d <= maxDepth; d++) {
-    let alpha = guess - window, beta = guess + window;
+    let alpha = guess - window,
+      beta = guess + window;
     let result: { score: number; best?: AnyMove };
 
     while (true) {
-      result = searchAlphaBeta(board, side, d, alpha, beta, start, { maxDepth, maxMs });
-      if (result.score <= alpha) { // fail-low, widen downward
-        alpha -= window * 2; window *= 2;
-      } else if (result.score >= beta) { // fail-high, widen upward
-        beta += window * 2; window *= 2;
+      result = searchAlphaBeta(board, side, d, alpha, beta, start, {
+        maxDepth,
+        maxMs,
+      });
+      if (result.score <= alpha) {
+        // fail-low, widen downward
+        alpha -= window * 2;
+        window *= 2;
+      } else if (result.score >= beta) {
+        // fail-high, widen upward
+        beta += window * 2;
+        window *= 2;
       } else {
         break; // in-window
       }
@@ -357,12 +467,17 @@ export function generateLegalArrangeMoves(board: Board, side: Side): PlannedArra
     if (!belongsTo(packed, side)) continue;
 
     const desc = getPieceDescriptor(board, i);
-    if (desc.kind !== "basic" && desc.kind !== "lotus" && desc.kind !== "orchid") continue;
+    if (desc.kind !== "basic" && desc.kind !== "lotus" && desc.kind !== "orchid")
+      continue;
 
     const limit =
-      desc.kind === "basic" ? desc.number :
-      desc.kind === "lotus" ? 2 :
-      desc.kind === "orchid" ? 6 : 0;
+      desc.kind === "basic"
+        ? desc.number
+        : desc.kind === "lotus"
+        ? 2
+        : desc.kind === "orchid"
+        ? 6
+        : 0;
     if (limit <= 0) continue;
 
     const seen = new Set<number>([i]);
@@ -373,7 +488,13 @@ export function generateLegalArrangeMoves(board: Board, side: Side): PlannedArra
       // validate full path as an Arrange move
       if (path.length > 0) {
         const valid = validateArrange(board, i, path);
-        if (valid.ok) out.push({ from: i, path: path.slice() });
+        if (valid.ok) {
+          // NEW: simulate and filter out clash positions
+          const child = applyPlannedArrange(board, { from: i, path });
+          if (!detectAnyClash(child)) {
+            out.push({ from: i, path: path.slice() });
+          }
+        }
       }
 
       if (path.length === limit) return;
@@ -396,13 +517,21 @@ export function generateLegalArrangeMoves(board: Board, side: Side): PlannedArra
 }
 
 // ---------- Public search entry ----------
-export function pickBestMove(board: Board, side: Side, depth: number, opts?: { maxMs?: number }) {
+export function pickBestMove(
+  board: Board,
+  side: Side,
+  depth: number,
+  opts?: { maxMs?: number }
+) {
   const move = searchIterativeDeepening(board, side, depth, opts?.maxMs);
   return move || null;
 }
 
 // ---------------- Harmony Bonus move generation ----------------
-export function generateWheelBonusMoves(board: Board, side: Side): _WheelPlan[] {
+export function generateWheelBonusMoves(
+  board: Board,
+  side: Side
+): _WheelPlan[] {
   const out: _WheelPlan[] = [];
   const N = (board as any).size1Based ?? 249;
   for (let i = 1; i <= N; i++) {
@@ -414,7 +543,10 @@ export function generateWheelBonusMoves(board: Board, side: Side): _WheelPlan[] 
   return out;
 }
 
-export function generateBoatFlowerBonusMoves(board: Board, side: Side): _BoatFlowerPlan[] {
+export function generateBoatFlowerBonusMoves(
+  board: Board,
+  side: Side
+): _BoatFlowerPlan[] {
   const out: _BoatFlowerPlan[] = [];
   const N = (board as any).size1Based ?? 249;
 
@@ -427,9 +559,14 @@ export function generateBoatFlowerBonusMoves(board: Board, side: Side): _BoatFlo
       if (!p) continue;
       const d = unpackPiece(p)!;
       const isFlower =
-        d.type === TypeId.R3 || d.type === TypeId.R4 || d.type === TypeId.R5 ||
-        d.type === TypeId.W3 || d.type === TypeId.W4 || d.type === TypeId.W5 ||
-        d.type === TypeId.Lotus || d.type === TypeId.Orchid;
+        d.type === TypeId.R3 ||
+        d.type === TypeId.R4 ||
+        d.type === TypeId.R5 ||
+        d.type === TypeId.W3 ||
+        d.type === TypeId.W4 ||
+        d.type === TypeId.W5 ||
+        d.type === TypeId.Lotus ||
+        d.type === TypeId.Orchid;
       if (!isFlower) continue;
 
       for (const to of NEIGHBORS8_1[f]) {
@@ -441,7 +578,10 @@ export function generateBoatFlowerBonusMoves(board: Board, side: Side): _BoatFlo
   return out;
 }
 
-export function generateBoatAccentBonusMoves(board: Board, side: Side): _BoatAccentPlan[] {
+export function generateBoatAccentBonusMoves(
+  board: Board,
+  side: Side
+): _BoatAccentPlan[] {
   const out: _BoatAccentPlan[] = [];
   const N = (board as any).size1Based ?? 249;
 
@@ -454,13 +594,18 @@ export function generateBoatAccentBonusMoves(board: Board, side: Side): _BoatAcc
       if (!p) continue;
       const d = unpackPiece(p)!;
       const isAccent =
-        d.type === TypeId.Rock || d.type === TypeId.Wheel || d.type === TypeId.Boat || d.type === TypeId.Knotweed;
+        d.type === TypeId.Rock ||
+        d.type === TypeId.Wheel ||
+        d.type === TypeId.Boat ||
+        d.type === TypeId.Knotweed;
       if (!isAccent) continue;
       if (d.type === TypeId.Boat) continue; // must be a non-boat accent
 
       const res = planBoatOnAccent(board, target, b);
-      if (res.ok) out.push({ boat: b, target, remove: res.remove.map(r => r.remove) });
+      if (res.ok)
+        out.push({ boat: b, target, remove: res.remove.map((r) => r.remove) });
     }
   }
   return out;
 }
+
