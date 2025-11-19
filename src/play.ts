@@ -553,43 +553,82 @@ async function handleBonusPlant(
   side: Side,
   ask: (q: string) => Promise<string>
 ) {
+  // Figure out what this side is still allowed to plant
   const rem = remainingFromBoard(b);
   const pool = side === "host" ? rem.host : rem.guest;
 
-  const allowed = ["R3","R4","R5","W3","W4","W5","Lotus","Orchid"] as const;
-  const available = allowed.filter(k => (pool[k] ?? 0) > 0);
+  const flowerNames = ["R3","R4","R5","W3","W4","W5","Lotus","Orchid"] as const;
+  const available = flowerNames.filter(name => (pool[name] ?? 0) > 0);
 
   if (available.length === 0) {
-    console.log("No flowers remaining to plant; bonus wasted.");
+    console.log("No flowers available to plant; bonus skipped.");
     return;
   }
 
-  console.log(`Available flowers to plant: ${available.join(", ")}`);
+  console.log("Available flowers to plant:", available.join(", "));
 
-  let type: TypeId;
-  while (true) {
-    const ans = (await ask("Plant which type? > ")).trim();
+  let chosenKey: string | null = null;
+  while (!chosenKey) {
+    const ans = (await ask("Plant which type? > ")).trim().toUpperCase();
+    const match = available.find(k => k.toUpperCase() === ans);
+    if (!match) {
+      console.log("Please choose one of:", available.join(", "));
+      continue;
+    }
+    chosenKey = match;
+  }
+
+  const typ = toTypeId(chosenKey);
+
+  // Choose which gate to plant in (your two gates, must be empty)
+  const g1 = gateFor(side);
+  const g2 = mirrorGateFor(side);
+
+  const gateOptions = [
+    { label: "A", x: g1.x, y: g1.y },
+    { label: "B", x: g2.x, y: g2.y },
+  ].filter(opt => !b.getAtIndex(idx1(opt.x, opt.y)));
+
+  if (gateOptions.length === 0) {
+    console.log("No empty gate available; bonus plant lost.");
+    return;
+  }
+
+  console.log("Available gates for bonus plant:");
+  for (const opt of gateOptions) {
+    console.log(`  ${opt.label}: (${opt.x},${opt.y})`);
+  }
+
+  let targetIdx: number | null = null;
+  while (targetIdx === null) {
+    const raw = (await ask("Choose gate (A/B) or coord x,y > ")).trim();
+    const upper = raw.toUpperCase();
+
+    // Quick A/B choice
+    const byLabel = gateOptions.find(o => o.label === upper);
+    if (byLabel) {
+      targetIdx = idx1(byLabel.x, byLabel.y);
+      break;
+    }
+
+    // Or explicit coordinates
     try {
-      type = toTypeId(ans);
+      const { x, y } = xyFromString(raw);
+      const allowed = gateOptions.find(o => o.x === x && o.y === y);
+      if (!allowed) {
+        console.log("That coord is not an empty gate for you.");
+        continue;
+      }
+      targetIdx = idx1(x, y);
     } catch {
-      console.log("Unknown type. Try again.");
-      continue;
+      console.log("Enter A/B or an x,y coord for one of the empty gates.");
     }
-    const key = keyForType(type);
-    if (!key || !available.includes(key as any)) {
-      console.log("You don't have any of that tile remaining.");
-      continue;
-    }
-    break;
   }
 
-  try {
-    plantOpening(b, side, type);
-    console.log("Bonus plant applied.");
-    console.log(boardWithSidebar(b));
-  } catch (e: any) {
-    console.log(`Bonus plant failed: ${e?.message ?? e}`);
-  }
+  const ownerEnum = side === "host" ? Owner.Host : Owner.Guest;
+  b.setAtIndex(targetIdx!, packPiece(typ, ownerEnum));
+  console.log("Bonus plant applied.");
+  console.log(boardWithSidebar(b));
 }
 
 async function handleHarmonyBonus(
