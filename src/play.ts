@@ -68,6 +68,12 @@ const STANDARD_POOL: CountMap = {
   Rock: 1, Wheel: 1, Boat: 1, Knotweed: 1,
 };
 
+function keyForType(type: TypeId): string | undefined {
+  const pair = PIECE_KEYS.find(([tid]) => tid === type);
+  return pair ? pair[1] : undefined;
+}
+
+
 function zeroCounts(): CountMap {
   const out: CountMap = {};
   for (const [, key] of PIECE_KEYS) out[key] = 0;
@@ -763,25 +769,43 @@ async function main() {
         continue;
       }
 
-      // Force place (debug)
-      if (lower.startsWith("place ")) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length < 4 || parts.length > 5) throw new Error("Use: place TYPE OWNER x,y [next]");
-        const type = toTypeId(parts[1]);
-        const owner = toOwner(parts[2]);
-        const { x, y } = xyFromString(parts[3]);
-        const advance = (parts[4]?.toLowerCase() === "next");
+      // Force place (debug, but still respect per-side pools)
+if (lower.startsWith("place ")) {
+  const parts = line.trim().split(/\s+/);
+  if (parts.length < 4 || parts.length > 5) {
+    throw new Error("Use: place TYPE OWNER x,y [next]");
+  }
 
-        pushHistory(b, toMove);
-        b.setAtIndex(idx1(x, y), packPiece(type, owner));
-        console.log(boardWithSidebar(b));
+  const type  = toTypeId(parts[1]);
+  const owner = toOwner(parts[2]);
+  const { x, y } = xyFromString(parts[3]);
+  const advance = (parts[4]?.toLowerCase() === "next");
 
-        const ownerSide: Side = owner === Owner.Host ? "host" : "guest";
-        if (advance || ownerSide === toMove) {
-          toMove = other(toMove);
-        }
-        continue;
-      }
+  // --- NEW: enforce remaining pool for that side ---
+  const rem = remainingFromBoard(b);
+  const pool = owner === Owner.Host ? rem.host : rem.guest;
+  const key  = keyForType(type);
+
+  if (!key) {
+    throw new Error(`Unknown type for pool: ${parts[1]}`);
+  }
+
+  if ((pool[key] ?? 0) <= 0) {
+    console.log(`Illegal place: no ${key} tiles remaining for that side.`);
+    continue;
+  }
+  // -----------------------------------------------
+
+  pushHistory(b, toMove);
+  b.setAtIndex(idx1(x, y), packPiece(type, owner));
+  console.log(boardWithSidebar(b));
+
+  const ownerSide: Side = owner === Owner.Host ? "host" : "guest";
+  if (advance || ownerSide === toMove) {
+    toMove = other(toMove);
+  }
+  continue;
+}
 
       console.log("Unknown command. Type 'help'.");
     } catch (e: any) {
