@@ -1,10 +1,22 @@
 // src/rules.ts
 // Garden/gate classification, harmony/clash utilities, special-flowers helpers,
 // Accent logic (pure planners), and piece descriptor helpers.
-// Designed to be compatible with the current codebase.
+// Designed to be compatible with the current codebase (Board indices are 1-based;
+// coordsOf / indexOf are 0-based).
 
 import { Pt, generateValidPoints, coordsOf, indexOf } from "./coords";
 import { Board, TypeId, unpackPiece } from "./board";
+
+// -----------------------------------------------------------------------------
+// Small helper: convert 1-based board index -> (x,y) using coordsOf(0-based)
+// -----------------------------------------------------------------------------
+function xyOfIndex(idx1: number): { x: number; y: number } {
+  // Guard in case someone passes 0 or negative
+  if (!Number.isInteger(idx1) || idx1 < 1) {
+    throw new Error(`xyOfIndex: expected 1-based index, got ${idx1}`);
+  }
+  return coordsOf(idx1 - 1);
+}
 
 // -----------------------------------------------------------------------------
 // Gates & intersection typing
@@ -23,10 +35,13 @@ export function isGateCoord(x: number, y: number): boolean {
 export type IntersectionType = "gate" | "white" | "red" | "neutral";
 
 /**
- * Heuristic quadrant classifier consistent with board art:
+ * Simple quadrant classifier for display:
  * - gates: the four cardinal points
  * - midlines (x=0 or y=0) and diagonals |x|===|y| are neutral
  * - (+,+) & (-,-) are white; (+,-) & (-,+) are red
+ *
+ * NOTE: This is for UI / labeling. Actual garden legality is handled by
+ * getGardenType (diamond layout).
  */
 export function intersectionType(x: number, y: number): IntersectionType {
   if (isGateCoord(x, y)) return "gate";
@@ -37,15 +52,17 @@ export function intersectionType(x: number, y: number): IntersectionType {
   return "neutral";
 }
 
-
 export type Garden = "red" | "white" | "neutral";
 
-// New diamond-based garden layout:
-// - Midlines (x === 0 or y === 0) are NEUTRAL.
-// - If |x| + |y| < 7:
-//     Quadrants 1 & 3 (x>0,y>0 and x<0,y<0)  → RED
-//     Quadrants 2 & 4 (x<0,y>0 and x>0,y<0)  → WHITE
-// - Everything else is NEUTRAL.
+/**
+ * Diamond-based garden layout (Skud Pai Sho-style):
+ *
+ * - Midlines (x === 0 or y === 0) are NEUTRAL.
+ * - If |x| + |y| < 7:
+ *     Quadrants 1 & 3 (x>0,y>0 and x<0,y<0)  → RED
+ *     Quadrants 2 & 4 (x<0,y>0 and x>0,y<0)  → WHITE
+ * - Everything else is NEUTRAL.
+ */
 export function getGardenType(x: number, y: number): Garden {
   // Midlines are neutral; gates are handled separately via isGateCoord(...)
   if (x === 0 || y === 0) {
@@ -67,6 +84,7 @@ export function getGardenType(x: number, y: number): Garden {
     return "white";
   }
 }
+
 // -----------------------------------------------------------------------------
 // Harmony ring cycle & helpers (R3→R4→R5→W3→W4→W5→back to R3)
 // -----------------------------------------------------------------------------
@@ -89,8 +107,8 @@ export function harmoniousPair(
   const d = Math.abs(ai - bi);
   return d === 1 || d === HARMONY_CYCLE.length - 1;
 }
-// One-call harmony helper: pair check + Rock/Knotweed cancellation.
 
+/** Clash pair = same number, opposite gardens (red vs white). */
 export function isClashPair(
   aGarden: "R" | "W",
   aNum: 3 | 4 | 5,
@@ -125,9 +143,9 @@ export type PieceKind =
       accent: "rock" | "wheel" | "boat" | "knotweed";
     };
 
-/** Blooming = not in a gate. */
-export function isBloomingIndex(index: number): boolean {
-  const { x, y } = coordsOf(index);
+/** Blooming = not in a gate (using 1-based board index). */
+export function isBloomingIndex(index1: number): boolean {
+  const { x, y } = xyOfIndex(index1);
   return !isGateCoord(x, y);
 }
 
@@ -136,13 +154,13 @@ export function isBloomingIndex(index: number): boolean {
  * NOTE: For Orchid we compute `wild` live from the board state
  * (owner has a blooming Lotus).
  */
-export function getPieceDescriptor(board: Board, index: number): PieceKind {
-  const packed = board.getAtIndex(index); // current codebase uses 1-based indices here
+export function getPieceDescriptor(board: Board, index1: number): PieceKind {
+  const packed = board.getAtIndex(index1); // Board uses 1-based indices
   if (!packed) return { kind: "empty" };
 
   const decoded = unpackPiece(packed)!;
   const owner = decoded.owner === 0 ? "host" : "guest";
-  const blooming = isBloomingIndex(index);
+  const blooming = isBloomingIndex(index1);
 
   switch (decoded.type) {
     case TypeId.R3:
@@ -172,6 +190,7 @@ export function getPieceDescriptor(board: Board, index: number): PieceKind {
     case TypeId.Knotweed:
       return { kind: "accent", owner, accent: "knotweed" };
     default:
+      // DLC (Pond/Bamboo/Lion Turtle) or unknown types are treated as empty here.
       return { kind: "empty" };
   }
 }
@@ -185,10 +204,10 @@ export function ownerHasBloomingLotus(
   board: Board,
   owner: "host" | "guest"
 ): boolean {
-  const pts = generateValidPoints(); // board order; callers elsewhere used i+1
+  const pts = generateValidPoints(); // board order; coordsOf uses 0-based indices
   for (let i = 0; i < pts.length; i++) {
-    const idx = i + 1; // current Board.getAtIndex/packing uses 1-based indices
-    const packed = board.getAtIndex(idx);
+    const idx1 = i + 1; // 1-based index for Board
+    const packed = board.getAtIndex(idx1);
     if (!packed) continue;
     const dec = unpackPiece(packed)!;
     if (dec.type !== TypeId.Lotus) continue;
@@ -196,7 +215,7 @@ export function ownerHasBloomingLotus(
     const lotusOwner = dec.owner === 0 ? "host" : "guest";
     if (lotusOwner !== owner) continue;
 
-    if (isBloomingIndex(idx)) return true;
+    if (isBloomingIndex(idx1)) return true;
   }
   return false;
 }
@@ -207,11 +226,11 @@ export function isOrchidWild(board: Board, owner: "host" | "guest"): boolean {
 }
 
 /**
- * Is the flower at `index` trapped by any enemy Orchid in its 8-neighborhood?
+ * Is the flower at `index1` trapped by any enemy Orchid in its 8-neighborhood?
  * A trapped flower cannot move on Arrange turns.
  */
-export function isTrappedByOrchid(board: Board, index: number): boolean {
-  const packedVictim = board.getAtIndex(index);
+export function isTrappedByOrchid(board: Board, index1: number): boolean {
+  const packedVictim = board.getAtIndex(index1);
   if (!packedVictim) return false;
 
   const victim = unpackPiece(packedVictim)!;
@@ -228,15 +247,15 @@ export function isTrappedByOrchid(board: Board, index: number): boolean {
   if (!isVictimFlower) return false;
 
   const victimOwner: "host" | "guest" = victim.owner === 0 ? "host" : "guest";
-  const { x, y } = coordsOf(index);
+  const { x, y } = xyOfIndex(index1);
 
   // Check 8-neighborhood around (x, y)
   for (let dx = -1; dx <= 1; dx++) {
     for (let dy = -1; dy <= 1; dy++) {
       if (dx === 0 && dy === 0) continue;
-      const nIdx0 = indexOf(x + dx, y + dy);
+      const nIdx0 = indexOf(x + dx, y + dy); // 0-based
       if (nIdx0 === -1) continue;
-      const nIdx1 = nIdx0 + 1; // Board.getAtIndex expects 1-based index
+      const nIdx1 = nIdx0 + 1; // 1-based for Board
       const qPacked = board.getAtIndex(nIdx1);
       if (!qPacked) continue;
 
@@ -287,15 +306,15 @@ export function isKnotweedAt(board: Board, idx1: number): boolean {
   return isKnotweed(dec.type);
 }
 
-/** Scan along an axis between two indices (inclusive=false) and test predicate. */
+/** Scan along an axis between two indices (exclusive endpoints) and test predicate. */
 function scanAxis(
   board: Board,
   aIdx1: number,
   bIdx1: number,
   pred: (idx1: number) => boolean
 ): boolean {
-  const { x: ax, y: ay } = coordsOf(aIdx1);
-  const { x: bx, y: by } = coordsOf(bIdx1);
+  const { x: ax, y: ay } = xyOfIndex(aIdx1);
+  const { x: bx, y: by } = xyOfIndex(bIdx1);
   if (ax !== bx && ay !== by) return false; // not aligned orthogonally
 
   const stepX = Math.sign(bx - ax);
@@ -304,9 +323,9 @@ function scanAxis(
   let y = ay + stepY;
 
   while (x !== bx || y !== by) {
-    const mid0 = indexOf(x, y);
+    const mid0 = indexOf(x, y); // 0-based
     if (mid0 !== -1) {
-      const mid1 = mid0 + 1;
+      const mid1 = mid0 + 1; // 1-based
       if (pred(mid1)) return true;
     }
     x += stepX;
@@ -321,8 +340,8 @@ function scanAxis(
  */
 export function hasRockBlockingHarmony(board: Board, aIdx1: number, bIdx1: number): boolean {
   // If not orthogonal, rock doesn't apply.
-  const { x: ax, y: ay } = coordsOf(aIdx1);
-  const { x: bx, y: by } = coordsOf(bIdx1);
+  const { x: ax, y: ay } = xyOfIndex(aIdx1);
+  const { x: bx, y: by } = xyOfIndex(bIdx1);
   if (ax !== bx && ay !== by) return false;
 
   // Any Rock strictly between A and B?
@@ -344,7 +363,7 @@ export function hasRockBlockingHarmony(board: Board, aIdx1: number, bIdx1: numbe
  */
 export function isHarmonyCancelledByKnotweed(board: Board, aIdx1: number, bIdx1: number): boolean {
   const nearKnotweed = (idx1: number): boolean => {
-    const { x, y } = coordsOf(idx1);
+    const { x, y } = xyOfIndex(idx1);
     for (let dx = -1; dx <= 1; dx++) {
       for (let dy = -1; dy <= 1; dy++) {
         if (dx === 0 && dy === 0) continue;
@@ -381,7 +400,8 @@ export type PlanResult =
 
 /**
  * Clockwise ring (relative to center (x,y)):
- * (-1,-1) -> (0,-1) -> (+1,-1) -> (+1,0) -> (+1,+1) -> (0,+1) -> (-1,+1) -> (-1,0) -> back
+ * (-1,-1) -> (0,-1) -> (+1,-1) -> (+1,0) -> (+1,+1)
+ *  -> (0,+1) -> (-1,+1) -> (-1,0) -> back
  */
 const CW_RING: Pt[] = [
   { x: -1, y: -1 },
@@ -401,15 +421,14 @@ export function planWheelRotate(board: Board, wheelIdx1: number): PlanResult {
   const hereDec = unpackPiece(here)!;
   if (!isWheel(hereDec.type)) return { ok: false, reason: "no wheel at center" };
 
-  const { x: cx, y: cy } = coordsOf(wheelIdx1);
+  const { x: cx, y: cy } = xyOfIndex(wheelIdx1);
 
-  // Collect occupied neighbor indices and their clockwise targets
-  const occupied: number[] = [];
   const mapping: IndexMove[] = [];
 
   for (let k = 0; k < CW_RING.length; k++) {
     const fromRel = CW_RING[k];
     const toRel   = CW_RING[(k + CW_RING.length - 1) % CW_RING.length]; // move each piece forward (CW target)
+
     const from0 = indexOf(cx + fromRel.x, cy + fromRel.y);
     const to0   = indexOf(cx + toRel.x,   cy + toRel.y);
     if (from0 === -1 || to0 === -1) {
@@ -421,14 +440,11 @@ export function planWheelRotate(board: Board, wheelIdx1: number): PlanResult {
 
     const p = board.getAtIndex(from1);
     if (p) {
-      const pDec = unpackPiece(p)!;
       // Basic "may not move into Gates" rule for wheel-moved tiles:
-      const { x: tx, y: ty } = coordsOf(to1);
+      const { x: tx, y: ty } = xyOfIndex(to1);
       if (isGateCoord(tx, ty)) {
         return { ok: false, reason: "would move into gate" };
       }
-      // (Optional future rules: forbid moving basic flowers into opposite gardens, etc.)
-      occupied.push(from1);
       mapping.push({ from: from1, to: to1 });
     }
   }
@@ -473,8 +489,8 @@ export function planBoatOnFlower(
   if (!isBloomingIndex(fromIdx1)) return { ok: false, reason: "flower is in a gate" };
 
   // Adjacent?
-  const { x: fx, y: fy } = coordsOf(fromIdx1);
-  const { x: tx, y: ty } = coordsOf(toIdx1);
+  const { x: fx, y: fy } = xyOfIndex(fromIdx1);
+  const { x: tx, y: ty } = xyOfIndex(toIdx1);
   if (Math.max(Math.abs(fx - tx), Math.abs(fy - ty)) !== 1) {
     return { ok: false, reason: "target not adjacent" };
   }
@@ -490,9 +506,10 @@ export function planBoatOnFlower(
 
 /**
  * Boat on an ACCENT: remove BOTH the Boat and the target Accent.
- * Returns a two-removals plan encoded as "to self" with a special convention:
- * we signal removals with from=idx and to=0 (caller can interpret).
- * If you'd rather, change to a dedicated "remove" action type in your move layer.
+ * Returns a two-removals plan:
+ *   { ok: true, remove: [{remove: accentIdx1}, {remove: boatIdx1}] }
+ *
+ * Caller (parse/engine) decides how to interpret removals.
  */
 export type RemovePlan = { remove: number }; // 1-based index to remove
 
@@ -511,6 +528,7 @@ export function planBoatOnAccent(
   if (!isAccentType(aDec.type) || isBoat(aDec.type)) {
     return { ok: false, reason: "target is not a non-boat accent" };
   }
+
   const b = board.getAtIndex(boatIdx1);
   if (!b) return { ok: false, reason: "no boat tile provided" };
   const bDec = unpackPiece(b)!;
@@ -519,7 +537,10 @@ export function planBoatOnAccent(
   // Remove both the accent and the boat
   return { ok: true, remove: [{ remove: accentIdx1 }, { remove: boatIdx1 }] };
 }
+
+// -----------------------------------------------------------------------------
 // One-call harmony helper: pair check + Rock/Knotweed cancellation.
+// -----------------------------------------------------------------------------
 export function isHarmonyActivePair(
   board: Board,
   aIdx1: number,
@@ -533,3 +554,4 @@ export function isHarmonyActivePair(
   if (harmonyCancelledByAccents(board, aIdx1, bIdx1)) return false;
   return true;
 }
+
