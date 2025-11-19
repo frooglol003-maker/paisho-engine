@@ -105,6 +105,22 @@ function remainingFromBoard(board: Board): { host: CountMap; guest: CountMap } {
   return { host: hostRem, guest: guestRem };
 }
 
+const ESC = (s: string) => `\u001b[${s}m`;
+const RESET = ESC("0");
+const BOLD = ESC("1");
+const DIM = ESC("2");
+const FG = (n: number) => ESC(`38;5;${n}`);
+const BG = (n: number) => ESC(`48;5;${n}`);
+
+const FG_HOST  = FG(39);   // blue-ish
+const FG_GUEST = FG(213);  // magenta-ish
+const GRID_DOT = FG(240);  // faint dot color
+
+const BG_NEUTRAL = BG(137); // brown
+const BG_RED     = BG(166); // red
+const BG_WHITE   = BG(230); // light wood
+const BG_GATE    = BG(34);  // green
+
 function countsToLines(label: string, m: CountMap, color: string): string[] {
   const rows: string[] = [];
   rows.push(`${BOLD}${color}${label}${RESET}`);
@@ -172,24 +188,6 @@ function enginePickOpeningType(board: Board, side: Side): TypeId | null {
   }
   return null;
 }
-
-// ---------- ANSI colors & rendering ----------
-const ESC = (s: string) => `\u001b[${s}m`;
-const RESET = ESC("0");
-const BOLD = ESC("1");
-const DIM = ESC("2");
-
-const FG = (n: number) => ESC(`38;5;${n}`);
-const BG = (n: number) => ESC(`48;5;${n}`);
-
-const FG_HOST  = FG(39);   // blue-ish
-const FG_GUEST = FG(213);  // magenta-ish
-const GRID_DOT = FG(240);  // faint dot color
-
-const BG_NEUTRAL = BG(137); // brown
-const BG_RED     = BG(166); // red
-const BG_WHITE   = BG(230); // light wood
-const BG_GATE    = BG(34);  // green
 
 function isGatePoint(x: number, y: number): boolean {
   return (x === -8 && y === 0) ||
@@ -403,8 +401,6 @@ function applyAnyMove(board: Board, side: Side, m: any): Board {
   }
 
   // === CLASH RULE ===
-  // If the resulting position contains *any* clash (standard or trap),
-  // treat the move as illegal.
   if (detectAnyClash(result)) {
     throw new Error("illegal: move produces a clash position");
   }
@@ -467,11 +463,12 @@ function other(side: Side): Side {
   return side === "host" ? "guest" : "host";
 }
 
-// ---- Harmony bonus helpers (replace existing versions) ----
+// ---------- Harmony bonus helpers ----------
 
-// Can this side take the "plant" bonus?
-//  - Disallowed if the player already has ANY piece in ANY gate.
-//  - Also requires at least one empty gate on the board.
+// listHarmonyEdges return type shim
+type HarmonyEdgeLite = { aIdx1: number; bIdx1: number; owner: Side };
+
+// Player can plant only if they have NO tile in ANY gate, and some gate is empty.
 function playerCanPlant(b: Board, side: Side): boolean {
   const myOwner = side === "host" ? Owner.Host : Owner.Guest;
 
@@ -493,16 +490,67 @@ function playerCanPlant(b: Board, side: Side): boolean {
       continue;
     }
     const dec = unpackPiece(packed)!;
-    if (dec.owner === myOwner) {
-      hasOwnInGate = true;
-    }
+    if (dec.owner === myOwner) hasOwnInGate = true;
   }
 
   if (hasOwnInGate) return false;
   return hasEmptyGate;
 }
 
-// Bonus “plant” flow: choose a flower type and any empty gate.
+// Bonus: place an accent (Rock / Wheel / Boat / Knotweed)
+async function handleBonusAccent(
+  b: Board,
+  side: Side,
+  ask: (q: string) => Promise<string>
+): Promise<void> {
+  const rem = remainingFromBoard(b);
+  const pool = side === "host" ? rem.host : rem.guest;
+
+  const ACCENTS = ["Rock", "Wheel", "Boat", "Knotweed"] as const;
+  const available = ACCENTS.filter(k => (pool[k] ?? 0) > 0);
+
+  if (available.length === 0) {
+    console.log("No accents remaining to place.");
+    return;
+  }
+
+  console.log("Available accents:", available.join(", "));
+
+  let chosenKey: string | null = null;
+  while (!chosenKey) {
+    const ans = (await ask("Accent type (Rock/Wheel/Boat/Knotweed) > "))
+      .trim().toUpperCase();
+    const match = available.find(k => k.toUpperCase() === ans);
+    if (!match) {
+      console.log("Please choose one of:", available.join(", "));
+      continue;
+    }
+    chosenKey = match;
+  }
+
+  const typ = toTypeId(chosenKey);
+  const ownerEnum = side === "host" ? Owner.Host : Owner.Guest;
+
+  let placed = false;
+  while (!placed) {
+    const raw = (await ask("Accent position x,y > ")).trim();
+    try {
+      const { x, y } = xyFromString(raw);
+      const idx = idx1(x, y);
+      if (b.getAtIndex(idx)) {
+        console.log("That coordinate is not empty.");
+        continue;
+      }
+      b.setAtIndex(idx, packPiece(typ, ownerEnum));
+      console.log("Bonus accent placed.");
+      placed = true;
+    } catch {
+      console.log("Invalid coordinate; use x,y.");
+    }
+  }
+}
+
+// Bonus: plant a flower into ANY empty gate
 async function handleBonusPlant(
   b: Board,
   side: Side,
@@ -510,18 +558,16 @@ async function handleBonusPlant(
 ): Promise<void> {
   const myOwner = side === "host" ? Owner.Host : Owner.Guest;
 
-  // First, enforce the global “can plant?” condition
   if (!playerCanPlant(b, side)) {
     console.log("You cannot plant: you already have a tile in a gate or there is no empty gate.");
     return;
   }
 
-  // 1) Which flower type?
   const rem = remainingFromBoard(b);
   const pool = side === "host" ? rem.host : rem.guest;
 
-  const FLOWER_KEYS = ["R3", "R4", "R5", "W3", "W4", "W5", "Lotus", "Orchid"] as const;
-  const available = FLOWER_KEYS.filter(k => (pool[k] ?? 0) > 0);
+  const FLOWERS = ["R3","R4","R5","W3","W4","W5","Lotus","Orchid"] as const;
+  const available = FLOWERS.filter(k => (pool[k] ?? 0) > 0);
 
   if (available.length === 0) {
     console.log("No flowers remaining to plant.");
@@ -544,14 +590,12 @@ async function handleBonusPlant(
     }
   }
 
-  // 2) Which gate? Now use ALL FOUR gates.
   const ALL_GATES = [
     { label: "A", x:  0, y:  8 },
     { label: "B", x:  0, y: -8 },
     { label: "C", x: -8, y:  0 },
     { label: "D", x:  8, y:  0 },
   ];
-
   const emptyGates = ALL_GATES.filter(g => !b.getAtIndex(idx1(g.x, g.y)));
 
   if (emptyGates.length === 0) {
@@ -571,14 +615,12 @@ async function handleBonusPlant(
 
     const up = raw.toUpperCase();
 
-    // By label
     const byLabel = emptyGates.find(g => g.label === up);
     if (byLabel) {
       targetGate = { x: byLabel.x, y: byLabel.y };
       break;
     }
 
-    // By coord
     try {
       const { x, y } = xyFromString(raw);
       const byCoord = emptyGates.find(g => g.x === x && g.y === y);
@@ -597,94 +639,12 @@ async function handleBonusPlant(
   console.log("Bonus plant applied.");
 }
 
-async function handleBonusPlant(
-  b: Board,
-  side: Side,
-  ask: (q: string) => Promise<string>
-) {
-  // Figure out what this side is still allowed to plant
-  const rem = remainingFromBoard(b);
-  const pool = side === "host" ? rem.host : rem.guest;
-
-  const flowerNames = ["R3","R4","R5","W3","W4","W5","Lotus","Orchid"] as const;
-  const available = flowerNames.filter(name => (pool[name] ?? 0) > 0);
-
-  if (available.length === 0) {
-    console.log("No flowers available to plant; bonus skipped.");
-    return;
-  }
-
-  console.log("Available flowers to plant:", available.join(", "));
-
-  let chosenKey: string | null = null;
-  while (!chosenKey) {
-    const ans = (await ask("Plant which type? > ")).trim().toUpperCase();
-    const match = available.find(k => k.toUpperCase() === ans);
-    if (!match) {
-      console.log("Please choose one of:", available.join(", "));
-      continue;
-    }
-    chosenKey = match;
-  }
-
-  const typ = toTypeId(chosenKey);
-
-  // Choose which gate to plant in (your two gates, must be empty)
-  const g1 = gateFor(side);
-  const g2 = mirrorGateFor(side);
-
-  const gateOptions = [
-    { label: "A", x: g1.x, y: g1.y },
-    { label: "B", x: g2.x, y: g2.y },
-  ].filter(opt => !b.getAtIndex(idx1(opt.x, opt.y)));
-
-  if (gateOptions.length === 0) {
-    console.log("No empty gate available; bonus plant lost.");
-    return;
-  }
-
-  console.log("Available gates for bonus plant:");
-  for (const opt of gateOptions) {
-    console.log(`  ${opt.label}: (${opt.x},${opt.y})`);
-  }
-
-  let targetIdx: number | null = null;
-  while (targetIdx === null) {
-    const raw = (await ask("Choose gate (A/B) or coord x,y > ")).trim();
-    const upper = raw.toUpperCase();
-
-    // Quick A/B choice
-    const byLabel = gateOptions.find(o => o.label === upper);
-    if (byLabel) {
-      targetIdx = idx1(byLabel.x, byLabel.y);
-      break;
-    }
-
-    // Or explicit coordinates
-    try {
-      const { x, y } = xyFromString(raw);
-      const allowed = gateOptions.find(o => o.x === x && o.y === y);
-      if (!allowed) {
-        console.log("That coord is not an empty gate for you.");
-        continue;
-      }
-      targetIdx = idx1(x, y);
-    } catch {
-      console.log("Enter A/B or an x,y coord for one of the empty gates.");
-    }
-  }
-
-  const ownerEnum = side === "host" ? Owner.Host : Owner.Guest;
-  b.setAtIndex(targetIdx!, packPiece(typ, ownerEnum));
-  console.log("Bonus plant applied.");
-  console.log(boardWithSidebar(b));
-}
-
+// Decide what to do with a harmony bonus
 async function handleHarmonyBonus(
   b: Board,
   side: Side,
   ask: (q: string) => Promise<string>
-) {
+): Promise<void> {
   console.log("Harmony bonus! A new harmony was created.");
 
   while (true) {
@@ -701,9 +661,8 @@ async function handleHarmonyBonus(
     }
 
     if (ans === "plant") {
-      const can = playerCanPlant(b, side);
-      if (!can) {
-        console.log("You cannot plant: you already have a tile in a gate.");
+      if (!playerCanPlant(b, side)) {
+        console.log("You cannot plant: you already have a tile in a gate or there is no empty gate.");
         continue;
       }
       await handleBonusPlant(b, side, ask);
@@ -859,8 +818,9 @@ async function main() {
         if (parts.length === 0) throw new Error("Empty path");
 
         // Capture harmony edges BEFORE move (for the side that is moving)
-        const beforeEdgesAll = listHarmonyEdges(b);
-        const beforeEdges = beforeEdgesAll.filter(e => e.owner === toMove);
+        const beforeEdges = (listHarmonyEdges(b) as HarmonyEdgeLite[]).filter(
+          e => e.owner === toMove
+        );
 
         let pathIdx: number[] | null = null;
         let lastReason: string | undefined;
@@ -952,15 +912,16 @@ async function main() {
           continue;
         }
 
-        // --- actually apply move (with clash validation inside applyAnyMove) ---
+        // --- actually apply move ---
         pushHistory(b, toMove);
         const mv = { kind: "arrange", from: fromIdx, path: pathIdx };
         const nb = applyAnyMove(b, toMove, mv);
         copyBoard(b, nb);
 
         // --- harmony bonus detection (only for the moving side) ---
-        const afterEdgesAll = listHarmonyEdges(b);
-        const afterEdges = afterEdgesAll.filter(e => e.owner === toMove);
+        const afterEdges = (listHarmonyEdges(b) as HarmonyEdgeLite[]).filter(
+          e => e.owner === toMove
+        );
 
         const edgeKey = (e: { aIdx1: number; bIdx1: number }) =>
           e.aIdx1 < e.bIdx1
