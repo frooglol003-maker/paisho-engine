@@ -1,13 +1,13 @@
 // src/parse.ts
 // Parse & apply high-ELO game records to Board states.
 // Supports setup placements, Arrange paths, Wheel rotation, Boat-on-flower, Boat-on-accent.
-// Now also supports XY-friendly actions to avoid index guesswork.
+// Also supports XY-friendly actions to avoid index guesswork.
 
 import * as fs from "fs";
 import * as readline from "readline";
 import { Board, TypeId, Owner, unpackPiece, packPiece } from "./board";
 import { coordsOf, indexOf } from "./coords";
-import { planWheelRotate, planBoatOnFlower, planBoatOnAccent } from "./rules";
+import { planBoatOnFlower, planBoatOnAccent } from "./rules";
 import { validateArrange } from "./move";
 import { applyPlannedArrange } from "./engine";
 
@@ -94,20 +94,19 @@ export function applySetup(board: Board, setup?: Placement[]) {
   if (!setup) return;
   for (const pl of setup) {
     const idx1 = toIndex1FromPlacement(pl);
-    // IMPORTANT: your packPiece signature is (type, owner)
     const packed = packPiece(typeFromName(pl.type), toOwnerEnum(pl.owner));
     board.setAtIndex(idx1, packed);
   }
 }
 
-// ----- Arrange (index-based) via validator + apply
+// ----- Arrange (index-based) via validator + apply -----
 export function applyArrange(board: Board, _side: Side, from: number, path: number[]) {
   const ok = validateArrange(board, from, path);
   if (!ok.ok) throw new Error(`arrange invalid: ${ok.reason ?? "unknown"}`);
   return applyPlannedArrange(board, { from, path });
 }
 
-// ----- Arrange (XY-based) convenience wrapper
+// ----- Arrange (XY-based) convenience wrapper -----
 export function applyArrangeXY(
   board: Board,
   side: Side,
@@ -119,16 +118,16 @@ export function applyArrangeXY(
   return applyArrange(board, side, from, path);
 }
 
+// ====== Wheel ======
 // Rotate the 8 surrounding intersections (king ring) clockwise.
 // Also enforce:
 //  - Illegal if any neighbor is a Rock
 //  - Illegal if any neighbor is a flower that is in a gate
 export function applyWheel(
   board: Board,
-  _side: any,          // keep whatever you had here; `any` is safest
+  _side: Side,
   centerIdx1: number
 ): Board {
-  // We mutate the given board in-place and return it.
   const centerXY = coordsOf(centerIdx1 - 1);
   if (!centerXY) throw new Error("Invalid wheel center index");
   const { x: cx, y: cy } = centerXY;
@@ -198,63 +197,97 @@ export function applyWheel(
     board.setAtIndex(idx1, rotated[i]);
   }
 
+  // Wheel piece itself just stays where it is; its "one-time ability" is enforced elsewhere.
   return board;
 }
 
-// ----- Wheel (XY-based)
-export function applyWheelXY(board: Board, _side: Side, centerXY: [number, number]) {
+// ----- Wheel (XY-based) -----
+export function applyWheelXY(board: Board, side: Side, centerXY: [number, number]) {
   const center = xyToIndex1(centerXY[0], centerXY[1]);
-  return applyWheel(board, _side, center);
+  return applyWheel(board, side, center);
 }
 
-// ----- Boat-on-flower (index-based)
-export function applyBoatFlower(board: Board, _side: Side, _boat: number, from: number, to: number) {
+// ====== Boat-on-flower ======
+// Boat moves a flower to one of the 8 surrounding spaces (adjacent king move).
+// Boat itself stays on the board (inert after use).
+export function applyBoatFlower(
+  board: Board,
+  _side: Side,
+  _boat: number, // kept for signature parity; rules layer decides which boat is used
+  from: number,
+  to: number
+) {
   const plan = planBoatOnFlower(board, from, to);
   if (!plan.ok) throw new Error(`boatFlower invalid: ${plan.reason}`);
+
+  const fromXY = coordsOf(from - 1);
+  const toXY   = coordsOf(to - 1);
+  if (!fromXY || !toXY) throw new Error("boatFlower: bad from/to index");
+
+  const dx = Math.abs(toXY.x - fromXY.x);
+  const dy = Math.abs(toXY.y - fromXY.y);
+  if ((dx === 0 && dy === 0) || dx > 1 || dy > 1) {
+    throw new Error("boatFlower: destination must be one of the 8 surrounding intersections.");
+  }
+
   const cloned = board.clone();
   const piece = cloned.getAtIndex(from);
-  const dest = cloned.getAtIndex(to);
+  const dest  = cloned.getAtIndex(to);
+  if (!piece) throw new Error("boatFlower: no piece at 'from'");
   if (dest) throw new Error("boatFlower: target occupied");
+
   cloned.setAtIndex(from, 0);
-  if (piece) cloned.setAtIndex(to, piece);
+  cloned.setAtIndex(to, piece);
   return cloned;
 }
 
-// ----- Boat-on-flower (XY-based)
+// ----- Boat-on-flower (XY-based) -----
 export function applyBoatFlowerXY(
   board: Board,
-  _side: Side,
-  _boatXY: [number, number], // present for parity; engine doesn't need it to move the flower
+  side: Side,
+  boatXY: [number, number],
   fromXY: [number, number],
   toXY: [number, number]
 ) {
-  const from = xyToIndex1(fromXY[0], fromXY[1]);
-  const to = xyToIndex1(toXY[0], toXY[1]);
-  return applyBoatFlower(board, _side, 0, from, to);
+  // boatXY is present for parity / logging; movement uses from/to
+  const _boat = xyToIndex1(boatXY[0], boatXY[1]);
+  const from  = xyToIndex1(fromXY[0], fromXY[1]);
+  const to    = xyToIndex1(toXY[0], toXY[1]);
+  return applyBoatFlower(board, side, _boat, from, to);
 }
 
-// ----- Boat-on-accent (index-based): remove BOTH the boat and the target accent
-export function applyBoatAccent(board: Board, _side: Side, boat: number, target: number) {
+// ====== Boat-on-accent ======
+// Removes BOTH the boat and the target accent (one-time use).
+export function applyBoatAccent(
+  board: Board,
+  _side: Side,
+  boat: number,
+  target: number
+) {
   const res = planBoatOnAccent(board, target, boat);
   if (!res.ok) throw new Error(`boatAccent invalid: ${res.reason}`);
+
   const cloned = board.clone();
-  for (const r of res.remove) cloned.setAtIndex(r.remove, 0);
+  // planBoatOnAccent tells us exactly which indices to clear.
+  for (const r of res.remove) {
+    cloned.setAtIndex(r.remove, 0);
+  }
   return cloned;
 }
 
-// ----- Boat-on-accent (XY-based)
+// ----- Boat-on-accent (XY-based) -----
 export function applyBoatAccentXY(
   board: Board,
-  _side: Side,
+  side: Side,
   boatXY: [number, number],
   targetXY: [number, number]
 ) {
-  const boat = xyToIndex1(boatXY[0], boatXY[1]);
+  const boat   = xyToIndex1(boatXY[0], boatXY[1]);
   const target = xyToIndex1(targetXY[0], targetXY[1]);
-  return applyBoatAccent(board, _side, boat, target);
+  return applyBoatAccent(board, side, boat, target);
 }
 
-// ----- Apply any action -----
+// ====== Apply any action ======
 export function applyAction(board: Board, action: Action): Board {
   switch (action.kind) {
     // Index-based
@@ -269,20 +302,21 @@ export function applyAction(board: Board, action: Action): Board {
     case "boatFlowerXY":  return applyBoatFlowerXY(board, action.side, action.boatXY, action.fromXY, action.toXY);
     case "boatAccentXY":  return applyBoatAccentXY(board, action.side, action.boatXY, action.targetXY);
 
-    default:
-      // Exhaustiveness check
+    default: {
       const _never: never = action as never;
       throw new Error(`Unknown action kind: ${(action as any).kind}`);
+    }
   }
 }
 
-// Load JSONL file -> GameRecord[] (with line numbers on errors)
+// ====== Load JSONL file -> GameRecord[] (with line numbers on errors) ======
 export async function loadGames(jsonlPath: string): Promise<GameRecord[]> {
   const games: GameRecord[] = [];
   const rl = readline.createInterface({
     input: fs.createReadStream(jsonlPath, { encoding: "utf8" }),
     crlfDelay: Infinity,
   });
+
   let lineNo = 0;
   for await (const line of rl) {
     lineNo++;
@@ -291,7 +325,9 @@ export async function loadGames(jsonlPath: string): Promise<GameRecord[]> {
     try {
       games.push(JSON.parse(trimmed));
     } catch (e: any) {
-      throw new Error(`JSONL parse error at ${jsonlPath}:${lineNo}\nLine: ${trimmed}\n${e.message}`);
+      throw new Error(
+        `JSONL parse error at ${jsonlPath}:${lineNo}\nLine: ${trimmed}\n${e.message}`
+      );
     }
   }
   return games;
