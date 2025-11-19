@@ -59,18 +59,13 @@ const PIECE_KEYS: [TypeId, string][] = [
   [TypeId.Boat, "Boat"], [TypeId.Knotweed, "Knotweed"],
 ];
 
-// Standard starting pool for BOTH players
+// **Total** starting pool for EACH player.
+// (If you ever want “2 rocks per side” etc, just change numbers here.)
 const STANDARD_POOL: CountMap = {
   R3: 3, R4: 3, R5: 3,
   W3: 3, W4: 3, W5: 3,
   Lotus: 1, Orchid: 1,
   Rock: 1, Wheel: 1, Boat: 1, Knotweed: 1,
-};
-
-// Live pools
-const POOL: { host: CountMap; guest: CountMap } = {
-  host: { ...STANDARD_POOL },
-  guest: { ...STANDARD_POOL },
 };
 
 function zeroCounts(): CountMap {
@@ -79,61 +74,57 @@ function zeroCounts(): CountMap {
   return out;
 }
 
+/** Count pieces currently on the board, split by owner. */
 function countsOnBoard(board: Board): { host: CountMap; guest: CountMap } {
   const host = zeroCounts();
   const guest = zeroCounts();
-  const N = (board as any).size1Based ?? 249;
+
+  const N: number =
+    (board as any).size ??
+    (board as any).size1Based ??
+    249;
+
   for (let i = 1; i <= N; i++) {
     const p = board.getAtIndex(i);
     if (!p) continue;
     const d = unpackPiece(p)!;
-    const key = PIECE_KEYS.find(([tid]) => tid === d.type)?.[1]!;
+    const key = PIECE_KEYS.find(([tid]) => tid === d.type)?.[1];
+    if (!key) continue;
+
     if (d.owner === Owner.Host) host[key] = (host[key] || 0) + 1;
-    else guest[key] = (guest[key] || 0) + 1;
+    else                        guest[key] = (guest[key] || 0) + 1;
   }
   return { host, guest };
 }
 
-function minusCounts(a: CountMap, b: CountMap): CountMap {
-  const out: CountMap = {};
-  for (const [, key] of PIECE_KEYS) out[key] = (a[key] || 0) - (b[key] || 0);
-  return out;
-}
+/** Derive remaining pool per side from board state + STANDARD_POOL. */
+function remainingFromBoard(board: Board): { host: CountMap; guest: CountMap } {
+  const onBoard = countsOnBoard(board);
+  const hostRem = zeroCounts();
+  const guestRem = zeroCounts();
 
-function toTypeId(name: string): TypeId {
-  const n = name.toUpperCase();
-  switch (n) {
-    case "R3": return TypeId.R3;
-    case "R4": return TypeId.R4;
-    case "R5": return TypeId.R5;
-    case "W3": return TypeId.W3;
-    case "W4": return TypeId.W4;
-    case "W5": return TypeId.W5;
-    case "LOTUS": return TypeId.Lotus;
-    case "ORCHID": return TypeId.Orchid;
-    case "ROCK": return TypeId.Rock;
-    case "WHEEL": return TypeId.Wheel;
-    case "BOAT": return TypeId.Boat;
-    case "KNOTWEED": return TypeId.Knotweed;
-    default: throw new Error(`Unknown type: ${name}`);
+  for (const [, key] of PIECE_KEYS) {
+    const total = STANDARD_POOL[key] ?? 0;
+    hostRem[key] = Math.max(0, total - (onBoard.host[key] ?? 0));
+    guestRem[key] = Math.max(0, total - (onBoard.guest[key] ?? 0));
   }
+  return { host: hostRem, guest: guestRem };
 }
 
-function isWhiteFlower(t: TypeId): boolean {
-  return t === TypeId.W3 || t === TypeId.W4 || t === TypeId.W5;
+function countsToLines(label: string, m: CountMap, color: string): string[] {
+  const rows: string[] = [];
+  rows.push(`${BOLD}${color}${label}${RESET}`);
+  let any = false;
+  for (const [, key] of PIECE_KEYS) {
+    const v = m[key] ?? 0;
+    if (v !== 0) {
+      any = true;
+      rows.push(`${color}${key.padEnd(8)} ${BOLD}${String(v).padStart(2)}${RESET}`);
+    }
+  }
+  if (!any) rows.push(`${DIM}(none)${RESET}`);
+  return rows;
 }
-
-function isRedFlower(t: TypeId): boolean {
-  return t === TypeId.R3 || t === TypeId.R4 || t === TypeId.R5;
-}
-
-function toOwner(s: string): Owner {
-  const v = s.toLowerCase();
-  if (v === "host") return Owner.Host;
-  if (v === "guest") return Owner.Guest;
-  throw new Error(`Owner must be host|guest (got ${s})`);
-}
-
 // ---------- Opening: gates & plant logic ----------
 const NORTH_GATE = { x: 0, y: +BOARD_RADIUS };
 const SOUTH_GATE = { x: 0, y: -BOARD_RADIUS };
@@ -154,6 +145,15 @@ function isEmptyBoard(b: Board): boolean {
 }
 
 function plantOpening(b: Board, who: Side, type: TypeId) {
+  // Enforce pool limit for the planting side
+  const rem = remainingFromBoard(b);
+  const pool = who === "host" ? rem.host : rem.guest;
+  const key = PIECE_KEYS.find(([tid]) => tid === type)?.[1];
+  if (!key) throw new Error(`Unknown type for pool: ${type}`);
+  if ((pool[key] ?? 0) <= 0) {
+    throw new Error(`No ${key} tiles remaining for ${who}`);
+  }
+
   const g = gateFor(who);
   const m = mirrorGateFor(who);
   const gi = idx1(g.x, g.y);
@@ -165,16 +165,15 @@ function plantOpening(b: Board, who: Side, type: TypeId) {
   b.setAtIndex(gi, packPiece(type, who === "host" ? Owner.Host : Owner.Guest));
   const otherOwner = who === "host" ? Owner.Guest : Owner.Host;
   b.setAtIndex(mi, packPiece(type, otherOwner));
-
-  const key = PIECE_KEYS.find(([tid]) => tid === type)![1];
-  POOL.host[key] = Math.max(0, (POOL.host[key] ?? 0) - 1);
-  POOL.guest[key] = Math.max(0, (POOL.guest[key] ?? 0) - 1);
 }
 
-function enginePickOpeningType(side: Side): TypeId | null {
+function enginePickOpeningType(board: Board, side: Side): TypeId | null {
+  const rem = remainingFromBoard(board);
+  const pool = side === "host" ? rem.host : rem.guest;
+
   const order = ["R3","W3","R4","W4","R5","W5","Lotus","Orchid"] as const;
   for (const k of order) {
-    if ((POOL[side][k] ?? 0) > 0) return toTypeId(k);
+    if ((pool[k] ?? 0) > 0) return toTypeId(k);
   }
   return null;
 }
@@ -278,15 +277,14 @@ function boardWithSidebar(board: Board): string {
     base += widths[r];
   }
 
-  // Side panel data
+    // Side panel data
   const onBoard = countsOnBoard(board);
   const hostOn = countsToLines("HOST on board", onBoard.host, FG_HOST);
   const guestOn = countsToLines("GUEST on board", onBoard.guest, FG_GUEST);
 
-  const hostRemaining = minusCounts(POOL.host, onBoard.host);
-  const guestRemaining = minusCounts(POOL.guest, onBoard.guest);
-  const hostRem = countsToLines("HOST remaining", hostRemaining, FG_HOST);
-  const guestRem = countsToLines("GUEST remaining", guestRemaining, FG_GUEST);
+  const rem = remainingFromBoard(board);
+  const hostRem = countsToLines("HOST remaining", rem.host, FG_HOST);
+  const guestRem = countsToLines("GUEST remaining", rem.guest, FG_GUEST);
 
   const sidebar: string[] = [];
   sidebar.push(
@@ -462,9 +460,9 @@ async function main() {
   console.log(boardWithSidebar(b));
   help();
 
-  // If engine is first and board is empty, let it plant the opening
+    // If engine is first and board is empty, let it plant the opening
   if (toMove !== HUMAN && isEmptyBoard(b)) {
-    const t = enginePickOpeningType(toMove);
+    const t = enginePickOpeningType(b, toMove);
     if (t) {
       pushHistory(b, toMove);
       plantOpening(b, toMove, t);
@@ -537,7 +535,7 @@ async function main() {
         const t0 = performance.now();
 
         if (isEmptyBoard(b)) {
-          const t = enginePickOpeningType(toMove);
+          const t = enginePickOpeningType(b, toMove);
           if (t) {
             pushHistory(b, toMove);
             plantOpening(b, toMove, t);
@@ -550,6 +548,7 @@ async function main() {
             continue;
           }
         }
+
 
         pushHistory(b, toMove);
         const mv = pickBestMove(b, toMove, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
