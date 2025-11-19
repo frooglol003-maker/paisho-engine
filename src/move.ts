@@ -295,7 +295,13 @@ export function findHarmonyRings(board: Board): number[][] {
   const visited = new Set<string>();
   const maxLen = 20;
 
-  function dfs(start: number, curr: number, parent: number | null, path: number[], seen: Set<number>) {
+  function dfs(
+    start: number,
+    curr: number,
+    parent: number | null,
+    path: number[],
+    seen: Set<number>
+  ) {
     if (path.length > maxLen) return;
     const neighbors = graph.get(curr) || [];
     for (const nb of neighbors) {
@@ -324,7 +330,7 @@ export function findHarmonyRings(board: Board): number[][] {
 }
 
 function cycleEnclosesOrigin(cycle: number[]): boolean {
-  const pts = cycle.map((i1) => coordsOf(i1 - 1)); // coords need 0-based
+  const pts = cycle.map((i1) => coordsOf(i1 - 1));
   let inside = false;
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
     const xi = pts[i].x, yi = pts[i].y;
@@ -335,7 +341,4 @@ function cycleEnclosesOrigin(cycle: number[]): boolean {
     if (intersect) inside = !inside;
   }
   return inside;
-}
-  }
-  return games;
 }
