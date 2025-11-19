@@ -316,6 +316,27 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
    Nodes: blooming basic tiles;
    Edges: share axis, lineOfSightClear, and isHarmonyActivePair (cancels for Rock/Knotweed).
 */
+export type HarmonyEdge = [number, number]; // 1-based indices
+
+export function listHarmonyEdges(board: Board): HarmonyEdge[] {
+  const g = buildHarmonyGraph(board);
+  const seen = new Set<string>();
+  const edges: HarmonyEdge[] = [];
+
+  for (const [a, neigh] of g.entries()) {
+    for (const b of neigh) {
+      const x = Math.min(a, b);
+      const y = Math.max(a, b);
+      const key = `${x}-${y}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        edges.push([x, y]);
+      }
+    }
+  }
+  return edges;
+}
+
 export function buildHarmonyGraph(board: Board): Map<number, number[]> {
   const pts = generateValidPoints();
   const nodeIdxs: number[] = [];
