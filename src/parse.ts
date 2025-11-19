@@ -119,53 +119,38 @@ export function applyArrangeXY(
   return applyArrange(board, side, from, path);
 }
 
-/**
- * Wheel: move all adjacent pieces one step clockwise around the wheel.
- * - Center stays where it is.
- * - We look at up to 8 surrounding squares in this order:
- *   N, NE, E, SE, S, SW, W, NW
- * - Only on-board neighbors are used (off-board positions are ignored).
- */
-// ... keep whatever other code you already have here ...
-
-// Rotate all 8 neighbors around a wheel center clockwise.
-// Disallowed if any neighbor is a Rock or a flower sitting in a gate.
+// Rotate the 8 surrounding intersections (king ring) clockwise.
+// Also enforce:
+//  - Illegal if any neighbor is a Rock
+//  - Illegal if any neighbor is a flower that is in a gate
 export function applyWheel(
   board: Board,
-  _side: "host" | "guest",
+  _side: any,          // keep whatever you had here; `any` is safest
   centerIdx1: number
 ): Board {
-  // Clone the board into result
-  const result = new Board();
-  const N = (board as any).size1Based ?? 249;
-  for (let i = 1; i <= N; i++) {
-    result.setAtIndex(i, board.getAtIndex(i) || 0);
-  }
-
-  // Center coords
-  const centerXY = coordsOf(centerIdx1 - 1) as { x: number; y: number } | undefined;
+  // We mutate the given board in-place and return it.
+  const centerXY = coordsOf(centerIdx1 - 1);
   if (!centerXY) throw new Error("Invalid wheel center index");
   const { x: cx, y: cy } = centerXY;
 
-  // 8 neighbors in clockwise order: N, NE, E, SE, S, SW, W, NW
-  const neighbors = [
-    { x: cx,     y: cy + 1 }, // N
-    { x: cx + 1, y: cy + 1 }, // NE
-    { x: cx + 1, y: cy     }, // E
-    { x: cx + 1, y: cy - 1 }, // SE
-    { x: cx,     y: cy - 1 }, // S
-    { x: cx - 1, y: cy - 1 }, // SW
-    { x: cx - 1, y: cy     }, // W
-    { x: cx - 1, y: cy + 1 }, // NW
+  // 8 neighbors around (cx,cy), clockwise, starting from top-left
+  const ring = [
+    { x: cx - 1, y: cy + 1 }, // 0 top-left
+    { x: cx,     y: cy + 1 }, // 1 top
+    { x: cx + 1, y: cy + 1 }, // 2 top-right
+    { x: cx + 1, y: cy     }, // 3 right
+    { x: cx + 1, y: cy - 1 }, // 4 bottom-right
+    { x: cx,     y: cy - 1 }, // 5 bottom
+    { x: cx - 1, y: cy - 1 }, // 6 bottom-left
+    { x: cx - 1, y: cy     }, // 7 left
   ];
 
-  // Map each neighbor to its 1-based board index (or null if off-board)
-  const idxs: (number | null)[] = neighbors.map(({ x, y }) => {
+  const idxs = ring.map(({ x, y }) => {
     const i0 = indexOf(x, y);
     return i0 === -1 ? null : i0 + 1;
   });
 
-  const isGateCoord = (x: number, y: number) =>
+  const isGate = (x: number, y: number) =>
     (x === 0 && (y === 8 || y === -8)) ||
     (y === 0 && (x === 8 || x === -8));
 
@@ -174,47 +159,46 @@ export function applyWheel(
     t === TypeId.W3 || t === TypeId.W4 || t === TypeId.W5 ||
     t === TypeId.Lotus || t === TypeId.Orchid;
 
-  // --- legality check: cannot wheel if touching rock or gate-flower ---
+  // --- Legality checks ---
   for (let i = 0; i < idxs.length; i++) {
     const idx1 = idxs[i];
-    if (idx1 == null) continue;          // off-board, ignore
+    if (!idx1) continue;
+
     const packed = board.getAtIndex(idx1);
-    if (!packed) continue;               // empty, ignore
+    if (!packed) continue;
 
-    const piece = unpackPiece(packed)!;
-    const { x, y } = neighbors[i];
+    const p = unpackPiece(packed)!;
+    const { x, y } = ring[i];
 
-    if (piece.type === TypeId.Rock) {
+    // 1) Illegal if touching a Rock
+    if (p.type === TypeId.Rock) {
       throw new Error("Illegal wheel: adjacent to a Rock.");
     }
 
-    if (isGateCoord(x, y) && isFlower(piece.type)) {
-      throw new Error("Illegal wheel: cannot move a flower that is in a gate.");
+    // 2) Illegal if moving a flower that is currently in a gate
+    if (isGate(x, y) && isFlower(p.type)) {
+      throw new Error("Illegal wheel: cannot move a flower in a gate.");
     }
   }
 
-  // --- rotate the ring contents (including empties) clockwise ---
+  // --- Perform clockwise rotation on the ring ---
+  const vals = idxs.map(i => (i ? board.getAtIndex(i) || 0 : 0));
+  const rotated = vals.slice();
 
-  // Grab the current values around the ring (0 for off-board / empty)
-  const vals: number[] = idxs.map(idx1 =>
-    idx1 == null ? 0 : board.getAtIndex(idx1) || 0
-  );
-
-  // newVals[i] = vals[(i + 7) % 8]  (clockwise rotation)
-  const newVals = vals.slice();
+  // clockwise: each neighbor takes the value of the previous one
   for (let i = 0; i < 8; i++) {
-    const from = (i + 7) % 8; // previous position in ring
-    newVals[i] = vals[from];
+    const from = (i + 7) % 8; // previous index
+    rotated[i] = vals[from];
   }
 
-  // Write back into the result board (only where there is a real square)
-  for (let i = 0; i < idxs.length; i++) {
+  // write back
+  for (let i = 0; i < 8; i++) {
     const idx1 = idxs[i];
-    if (idx1 == null) continue;
-    result.setAtIndex(idx1, newVals[i]);
+    if (!idx1) continue;
+    board.setAtIndex(idx1, rotated[i]);
   }
 
-  return result;
+  return board;
 }
 
 // ----- Wheel (XY-based)
