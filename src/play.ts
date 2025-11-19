@@ -6,8 +6,8 @@ import { Board, TypeId, Owner, packPiece, unpackPiece } from "./board";
 import { coordsOf, indexOf } from "./coords";
 import { pickBestMove, applyPlannedArrange } from "./engine";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
-import { validateArrange, detectAnyClash, listHarmonyEdges} from "./move";
-import { getGardenType } from "./rules";   // <-- add this line
+import { validateArrange, detectAnyClash, listHarmonyEdges } from "./move";
+import { getGardenType } from "./rules";
 
 // ---------- CLI ----------
 const args = Object.fromEntries(
@@ -39,16 +39,6 @@ function xyFromString(s: string): { x: number; y: number } {
   return { x: parseInt(m[1], 10), y: parseInt(m[2], 10) };
 }
 
-function parsePathList(s: string): number[] {
-  // "x1,y1; x2,y2; ..."
-  const parts = s.split(";").map(p => p.trim()).filter(Boolean);
-  if (parts.length === 0) throw new Error("Empty path");
-  return parts.map(p => {
-    const { x, y } = xyFromString(p);
-    return idx1(x, y);
-  });
-}
-
 // ---------- Pools & counting ----------
 type CountMap = Record<string, number>;
 const PIECE_KEYS: [TypeId, string][] = [
@@ -60,7 +50,6 @@ const PIECE_KEYS: [TypeId, string][] = [
 ];
 
 // **Total** starting pool for EACH player.
-// (If you ever want “2 rocks per side” etc, just change numbers here.)
 const STANDARD_POOL: CountMap = {
   R3: 3, R4: 3, R5: 3,
   W3: 3, W4: 3, W5: 3,
@@ -72,7 +61,6 @@ function keyForType(type: TypeId): string | undefined {
   const pair = PIECE_KEYS.find(([tid]) => tid === type);
   return pair ? pair[1] : undefined;
 }
-
 
 function zeroCounts(): CountMap {
   const out: CountMap = {};
@@ -94,7 +82,7 @@ function countsOnBoard(board: Board): { host: CountMap; guest: CountMap } {
     const p = board.getAtIndex(i);
     if (!p) continue;
     const d = unpackPiece(p)!;
-    const key = PIECE_KEYS.find(([tid]) => tid === d.type)?.[1];
+    const key = keyForType(d.type);
     if (!key) continue;
 
     if (d.owner === Owner.Host) host[key] = (host[key] || 0) + 1;
@@ -131,6 +119,7 @@ function countsToLines(label: string, m: CountMap, color: string): string[] {
   if (!any) rows.push(`${DIM}(none)${RESET}`);
   return rows;
 }
+
 // ---------- Opening: gates & plant logic ----------
 const NORTH_GATE = { x: 0, y: +BOARD_RADIUS };
 const SOUTH_GATE = { x: 0, y: -BOARD_RADIUS };
@@ -154,7 +143,7 @@ function plantOpening(b: Board, who: Side, type: TypeId) {
   // Enforce pool limit for the planting side
   const rem = remainingFromBoard(b);
   const pool = who === "host" ? rem.host : rem.guest;
-  const key = PIECE_KEYS.find(([tid]) => tid === type)?.[1];
+  const key = keyForType(type);
   if (!key) throw new Error(`Unknown type for pool: ${type}`);
   if ((pool[key] ?? 0) <= 0) {
     throw new Error(`No ${key} tiles remaining for ${who}`);
@@ -258,7 +247,7 @@ function safeXY(idx1Val: number): string {
   }
 }
 
-// ---------- Helper conversions (needed by play.ts) ----------
+// ---------- Helper conversions ----------
 function toTypeId(name: string): TypeId {
   const normalized = name.trim().toUpperCase();
   switch (normalized) {
@@ -304,7 +293,7 @@ function boardWithSidebar(board: Board): string {
     base += widths[r];
   }
 
-    // Side panel data
+  // Side panel data
   const onBoard = countsOnBoard(board);
   const hostOn = countsToLines("HOST on board", onBoard.host, FG_HOST);
   const guestOn = countsToLines("GUEST on board", onBoard.guest, FG_GUEST);
@@ -478,6 +467,165 @@ function other(side: Side): Side {
   return side === "host" ? "guest" : "host";
 }
 
+// ---------- Harmony bonus helpers ----------
+
+function playerCanPlant(b: Board, side: Side): boolean {
+  // Bonus plant is allowed only if **this side** has no tiles in any gate.
+  const gateCoords = [
+    { x: 0, y: +BOARD_RADIUS },
+    { x: 0, y: -BOARD_RADIUS },
+    { x: +BOARD_RADIUS, y: 0 },
+    { x: -BOARD_RADIUS, y: 0 },
+  ];
+  const desiredOwner = side === "host" ? Owner.Host : Owner.Guest;
+
+  for (const g of gateCoords) {
+    const i0 = indexOf(g.x, g.y);
+    if (i0 === -1) continue;
+    const idx1Val = i0 + 1;
+    const p = b.getAtIndex(idx1Val);
+    if (!p) continue;
+    const d = unpackPiece(p)!;
+    if (d.owner === desiredOwner) return false;
+  }
+  return true;
+}
+
+async function handleBonusAccent(
+  b: Board,
+  side: Side,
+  ask: (q: string) => Promise<string>
+) {
+  const rem = remainingFromBoard(b);
+  const pool = side === "host" ? rem.host : rem.guest;
+
+  const allowed = ["Rock", "Wheel", "Boat", "Knotweed"] as const;
+  const available = allowed.filter(k => (pool[k] ?? 0) > 0);
+
+  if (available.length === 0) {
+    console.log("No accent tiles remaining; bonus wasted.");
+    return;
+  }
+
+  console.log(`Available accents: ${available.join(", ")}`);
+
+  let type: TypeId;
+  while (true) {
+    const ans = (await ask("Accent type (Rock/Wheel/Boat/Knotweed) > ")).trim();
+    try {
+      type = toTypeId(ans);
+    } catch {
+      console.log("Unknown type. Try again.");
+      continue;
+    }
+    const key = keyForType(type);
+    if (!key || !available.includes(key as any)) {
+      console.log("You don't have any of that accent remaining.");
+      continue;
+    }
+    break;
+  }
+
+  // Target coord
+  let targetIdx: number;
+  while (true) {
+    try {
+      const coordStr = await ask("Accent position x,y > ");
+      const { x, y } = xyFromString(coordStr);
+      targetIdx = idx1(x, y);
+      if (b.getAtIndex(targetIdx)) {
+        console.log("That intersection is occupied; pick another.");
+        continue;
+      }
+      break;
+    } catch (e: any) {
+      console.log(`Bad coord: ${e?.message ?? e}`);
+    }
+  }
+
+  b.setAtIndex(targetIdx, packPiece(type, side === "host" ? Owner.Host : Owner.Guest));
+  console.log("Bonus accent placed.");
+  console.log(boardWithSidebar(b));
+}
+
+async function handleBonusPlant(
+  b: Board,
+  side: Side,
+  ask: (q: string) => Promise<string>
+) {
+  const rem = remainingFromBoard(b);
+  const pool = side === "host" ? rem.host : rem.guest;
+
+  const allowed = ["R3","R4","R5","W3","W4","W5","Lotus","Orchid"] as const;
+  const available = allowed.filter(k => (pool[k] ?? 0) > 0);
+
+  if (available.length === 0) {
+    console.log("No flowers remaining to plant; bonus wasted.");
+    return;
+  }
+
+  console.log(`Available flowers to plant: ${available.join(", ")}`);
+
+  let type: TypeId;
+  while (true) {
+    const ans = (await ask("Plant which type? > ")).trim();
+    try {
+      type = toTypeId(ans);
+    } catch {
+      console.log("Unknown type. Try again.");
+      continue;
+    }
+    const key = keyForType(type);
+    if (!key || !available.includes(key as any)) {
+      console.log("You don't have any of that tile remaining.");
+      continue;
+    }
+    break;
+  }
+
+  try {
+    plantOpening(b, side, type);
+    console.log("Bonus plant applied.");
+    console.log(boardWithSidebar(b));
+  } catch (e: any) {
+    console.log(`Bonus plant failed: ${e?.message ?? e}`);
+  }
+}
+
+async function handleHarmonyBonus(
+  b: Board,
+  side: Side,
+  ask: (q: string) => Promise<string>
+) {
+  console.log("Harmony bonus! A new harmony was created.");
+
+  while (true) {
+    const ans = (await ask("Bonus? (accent / plant / skip) > ")).trim().toLowerCase();
+
+    if (ans === "skip") {
+      console.log("Bonus skipped.");
+      return;
+    }
+
+    if (ans === "accent") {
+      await handleBonusAccent(b, side, ask);
+      return;
+    }
+
+    if (ans === "plant") {
+      const can = playerCanPlant(b, side);
+      if (!can) {
+        console.log("You cannot plant: you already have a tile in a gate.");
+        continue;
+      }
+      await handleBonusPlant(b, side, ask);
+      return;
+    }
+
+    console.log("Please choose: accent / plant / skip");
+  }
+}
+
 // ---------- Main loop ----------
 async function main() {
   const b = new Board(); // EMPTY START
@@ -487,7 +635,7 @@ async function main() {
   console.log(boardWithSidebar(b));
   help();
 
-    // If engine is first and board is empty, let it plant the opening
+  // If engine is first and board is empty, let it plant the opening
   if (toMove !== HUMAN && isEmptyBoard(b)) {
     const t = enginePickOpeningType(b, toMove);
     if (t) {
@@ -576,7 +724,6 @@ async function main() {
           }
         }
 
-
         pushHistory(b, toMove);
         const mv = pickBestMove(b, toMove, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
         const t1 = performance.now();
@@ -614,6 +761,9 @@ async function main() {
         const rhs = m[1].trim();
         const parts = rhs.split(";").map(p => p.trim()).filter(Boolean);
         if (parts.length === 0) throw new Error("Empty path");
+
+        // Capture harmony edges BEFORE move
+        const beforeEdges = listHarmonyEdges(b);
 
         let pathIdx: number[] | null = null;
         let lastReason: string | undefined;
@@ -665,7 +815,6 @@ async function main() {
             if (attempt2.res.ok) {
               pathIdx = attempt2.idxPath;
             } else {
-              // keep the second reason if the first was undefined
               if (!lastReason) lastReason = attempt2.res.reason;
             }
           }
@@ -684,10 +833,11 @@ async function main() {
             continue;
           }
         }
-                // --- garden color legality: only final landing matters ---
+
+        // --- garden color legality: only final landing matters ---
         const lastIdx = pathIdx[pathIdx.length - 1];
         const lastXY  = coordsOf(lastIdx - 1);
-        const garden  = getGardenType(lastXY.x, lastXY.y); // "red" | "white" | undefined
+        const garden  = getGardenType(lastXY.x, lastXY.y); // "red" | "white" | "neutral"
 
         const pieceVal = b.getAtIndex(fromIdx);
         if (!pieceVal) {
@@ -705,12 +855,28 @@ async function main() {
           continue;
         }
 
+        // Apply arrange
         pushHistory(b, toMove);
         const mv = { kind: "arrange", from: fromIdx, path: pathIdx };
         const nb = applyAnyMove(b, toMove, mv);
         copyBoard(b, nb);
-        toMove = other(toMove);
         console.log(boardWithSidebar(b));
+
+        // ---- Harmony bonus detection (only for HUMAN side) ----
+        const afterEdges = listHarmonyEdges(b);
+        const beforeSet = new Set(beforeEdges.map(([a, b]) =>
+          `${Math.min(a, b)}-${Math.max(a, b)}`
+        ));
+        const newHarmony = afterEdges.some(([a, b]) => {
+          const k = `${Math.min(a, b)}-${Math.max(a, b)}`;
+          return !beforeSet.has(k);
+        });
+
+        if (newHarmony && toMove === HUMAN) {
+          await handleHarmonyBonus(b, toMove, ask);
+        }
+
+        toMove = other(toMove);
         continue;
       }
 
@@ -770,61 +936,45 @@ async function main() {
       }
 
       // Force place (debug, but still respect per-side pools)
-// Force place (debug, but still respect per-side pools)
-if (lower.startsWith("place ")) {
-  const parts = line.trim().split(/\s+/);
-  if (parts.length < 4 || parts.length > 5) {
-    throw new Error("Use: place TYPE OWNER x,y [next]");
-  }
+      if (lower.startsWith("place ")) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 4 || parts.length > 5) {
+          throw new Error("Use: place TYPE OWNER x,y [next]");
+        }
 
-  const type  = toTypeId(parts[1]);
-  const owner = toOwner(parts[2]);
-  const { x, y } = xyFromString(parts[3]);
-  const advance = (parts[4]?.toLowerCase() === "next");
+        const type  = toTypeId(parts[1]);
+        const owner = toOwner(parts[2]);
+        const { x, y } = xyFromString(parts[3]);
+        const advance = (parts[4]?.toLowerCase() === "next");
 
-  // --- NEW: target intersection must be empty ---
-  const targetIdx = idx1(x, y);
-  if (b.getAtIndex(targetIdx)) {
-    console.log("Illegal place: intersection already occupied.");
-    continue;
-  }
-  // ---------------------------------------------
+        const targetIdx = idx1(x, y);
+        if (b.getAtIndex(targetIdx)) {
+          console.log("Illegal place: intersection already occupied.");
+          continue;
+        }
 
-  // Enforce remaining pool for that side
-  const rem  = remainingFromBoard(b);
-  const pool = owner === Owner.Host ? rem.host : rem.guest;
-  const key  = keyForType(type);
+        const rem  = remainingFromBoard(b);
+        const pool = owner === Owner.Host ? rem.host : rem.guest;
+        const key  = keyForType(type);
 
-  if (!key) {
-    throw new Error(`Unknown type for pool: ${parts[1]}`);
-  }
-  if ((pool[key] ?? 0) <= 0) {
-    console.log(`Illegal place: no ${key} tiles remaining for that side.`);
-    continue;
-  }
+        if (!key) {
+          throw new Error(`Unknown type for pool: ${parts[1]}`);
+        }
+        if ((pool[key] ?? 0) <= 0) {
+          console.log(`Illegal place: no ${key} tiles remaining for that side.`);
+          continue;
+        }
 
-  pushHistory(b, toMove);
-  b.setAtIndex(targetIdx, packPiece(type, owner));
-  console.log(boardWithSidebar(b));
+        pushHistory(b, toMove);
+        b.setAtIndex(targetIdx, packPiece(type, owner));
+        console.log(boardWithSidebar(b));
 
-  const ownerSide: Side = owner === Owner.Host ? "host" : "guest";
-  if (advance || ownerSide === toMove) {
-    toMove = other(toMove);
-  }
-  continue;
-}
-  // -----------------------------------------------
-
-  pushHistory(b, toMove);
-  b.setAtIndex(idx1(x, y), packPiece(type, owner));
-  console.log(boardWithSidebar(b));
-
-  const ownerSide: Side = owner === Owner.Host ? "host" : "guest";
-  if (advance || ownerSide === toMove) {
-    toMove = other(toMove);
-  }
-  continue;
-}
+        const ownerSide: Side = owner === Owner.Host ? "host" : "guest";
+        if (advance || ownerSide === toMove) {
+          toMove = other(toMove);
+        }
+        continue;
+      }
 
       console.log("Unknown command. Type 'help'.");
     } catch (e: any) {
@@ -834,35 +984,6 @@ if (lower.startsWith("place ")) {
 
   rl.close();
   console.log("Bye!");
-}
-async function handleHarmonyBonus(b: Board, side: Side, ask: (q: string)=>Promise<string>) {
-  console.log(`Harmony bonus!`);
-
-  while (true) {
-    const ans = (await ask("Bonus? (accent / plant / skip) > ")).trim().toLowerCase();
-
-    if (ans === "skip") {
-      console.log("Bonus skipped.");
-      return;
-    }
-
-    if (ans === "accent") {
-      await handleBonusAccent(b, side, ask);
-      return;
-    }
-
-    if (ans === "plant") {
-      const can = playerCanPlant(b, side);
-      if (!can) {
-        console.log("You cannot plant: one of your gates is blocked.");
-        continue;
-      }
-      await handleBonusPlant(b, side, ask);
-      return;
-    }
-
-    console.log("Please choose: accent / plant / skip");
-  }
 }
 
 main().catch(e => { console.error(e); process.exit(1); });
