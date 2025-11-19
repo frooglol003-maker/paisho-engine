@@ -985,22 +985,123 @@ async function main() {
         continue;
       }
 
-      // Boat on flower
+         // Boat on flower
       if (lower.startsWith("boatf ")) {
-        const body = line.slice(6);
-        const [lhs, rhs] = body.split("->").map(s => s.trim());
-        if (!lhs || !rhs) throw new Error("Use: boatf boatX,boatY fromX,fromY -> toX,toY");
-        const [bxy, fxy] = lhs.split(/\s+/).map(s => s.trim());
-        const boat = xyFromString(bxy);
-        const from = xyFromString(fxy);
-        const to   = xyFromString(rhs);
-        const mv = {
-          kind: "boatFlower",
-          boat: idx1(boat.x, boat.y),
-          from: idx1(from.x, from.y),
-          to:   idx1(to.x, to.y)
-        };
+        const body = line.slice(6).trim();
+        // New syntax: boatf boatX,boatY fromX,fromY   (we'll prompt for destination)
+        const parts = body.split(/\s+/).map(s => s.trim()).filter(Boolean);
+        if (parts.length !== 2) {
+          throw new Error("Use: boatf boatX,boatY fromX,fromY");
+        }
+
+        const boatCoord = xyFromString(parts[0]);
+        const fromCoord = xyFromString(parts[1]);
+        const boatIdx   = idx1(boatCoord.x, boatCoord.y);
+        const fromIdx   = idx1(fromCoord.x, fromCoord.y);
+
+        // --- Check boat piece ---
+        const boatVal = b.getAtIndex(boatIdx);
+        if (!boatVal) {
+          console.log("Illegal boat: no boat at that coordinate.");
+          continue;
+        }
+        const boatPiece = unpackPiece(boatVal)!;
+        if (boatPiece.type !== TypeId.Boat) {
+          console.log("Illegal boat: piece at boatX,boatY is not a Boat.");
+          continue;
+        }
+
+        // --- Check flower piece ---
+        const flowerVal = b.getAtIndex(fromIdx);
+        if (!flowerVal) {
+          console.log("Illegal boat: no flower at fromX,fromY.");
+          continue;
+        }
+        const flower = unpackPiece(flowerVal)!;
+        const isFlower =
+          flower.type === TypeId.R3 || flower.type === TypeId.R4 || flower.type === TypeId.R5 ||
+          flower.type === TypeId.W3 || flower.type === TypeId.W4 || flower.type === TypeId.W5 ||
+          flower.type === TypeId.Lotus || flower.type === TypeId.Orchid;
+        if (!isFlower) {
+          console.log("Illegal boat: target piece is not a flower.");
+          continue;
+        }
+
+        // --- Find 8 surrounding legal destinations around the flower ---
+        const basis = coordsOf(fromIdx - 1) as { x: number; y: number } | undefined;
+        if (!basis) {
+          console.log("Illegal boat: source coordinate invalid.");
+          continue;
+        }
+
+        const dirs: [number, number][] = [
+          [-1,  1], [0,  1], [1,  1],  // A, B, C
+          [ 1,  0],                    // D
+          [ 1, -1], [0, -1], [-1, -1], // E, F, G
+          [-1,  0],                    // H
+        ];
+        const labels = ["A","B","C","D","E","F","G","H"];
+
+        const neighbors: { label: string; x: number; y: number; idx1: number }[] = [];
+
+        for (let i = 0; i < dirs.length; i++) {
+          const [dx, dy] = dirs[i];
+          const x = basis.x + dx;
+          const y = basis.y + dy;
+          const i0 = indexOf(x, y);
+          if (i0 === -1) continue;          // off board
+          const idx1Val = i0 + 1;
+          if (b.getAtIndex(idx1Val)) continue; // must be empty
+
+          // Garden-color legality for flowers, same rule as arrange:
+          const g = getGardenType(x, y); // "red" | "white" | "neutral"
+          if (isWhiteFlower(flower.type) && g === "red") continue;
+          if (isRedFlower(flower.type) && g === "white") continue;
+
+          neighbors.push({ label: labels[i], x, y, idx1: idx1Val });
+        }
+
+        if (neighbors.length === 0) {
+          console.log("Illegal boat: no legal destination adjacent to the flower.");
+          continue;
+        }
+
+        console.log("Boat activated. Legal destinations:");
+        for (const n of neighbors) {
+          console.log(`  ${n.label}: (${n.x},${n.y})`);
+        }
+
+        let destIdx: number | null = null;
+        while (destIdx === null) {
+          const ansRaw = (await ask("Choose destination (letter or x,y) > ")).trim();
+          if (!ansRaw) continue;
+          const up = ansRaw.toUpperCase();
+
+          // by letter
+          const byLabel = neighbors.find(n => n.label === up);
+          if (byLabel) {
+            destIdx = byLabel.idx1;
+            break;
+          }
+
+          // or by coord
+          try {
+            const { x, y } = xyFromString(ansRaw);
+            const byCoord = neighbors.find(n => n.x === x && n.y === y);
+            if (!byCoord) {
+              console.log("That coordinate is not a legal destination for this boat move.");
+              continue;
+            }
+            destIdx = byCoord.idx1;
+            break;
+          } catch {
+            console.log("Please enter a valid letter or x,y coordinate.");
+          }
+        }
+
+        // Apply the move (with clash & gate checks via applyAnyMove / rules)
         pushHistory(b, toMove);
+        const mv = { kind: "boatFlower", boat: boatIdx, from: fromIdx, to: destIdx! };
         const nb = applyAnyMove(b, toMove, mv);
         copyBoard(b, nb);
         toMove = other(toMove);
