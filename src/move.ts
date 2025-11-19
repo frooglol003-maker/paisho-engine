@@ -201,6 +201,50 @@ function maxArrangeSteps(t: TypeId): number | null {
  *   destination’s garden color must be legal for the tile.
  * - If the starting tile is trapped by an enemy Orchid, the move is illegal.
  */
+export type ArrangeValidation = { ok: true } | { ok: false; reason: string };
+
+function isRedFlower(t: TypeId): boolean {
+  return t === TypeId.R3 || t === TypeId.R4 || t === TypeId.R5;
+}
+function isWhiteFlower(t: TypeId): boolean {
+  return t === TypeId.W3 || t === TypeId.W4 || t === TypeId.W5;
+}
+
+function canStopOnGarden(type: TypeId, x: number, y: number): boolean {
+  const g = gardenAt(x, y); // use local geometry, not rules.getGardenType
+
+  if (g === "neutral") return true;
+
+  if (g === "red" && isWhiteFlower(type)) return false;
+  if (g === "white" && isRedFlower(type)) return false;
+
+  // Lotus / Orchid / accents can land anywhere
+  return true;
+}
+
+function maxArrangeSteps(t: TypeId): number | null {
+  switch (t) {
+    case TypeId.R3:
+    case TypeId.W3: return 3;
+    case TypeId.R4:
+    case TypeId.W4: return 4;
+    case TypeId.R5:
+    case TypeId.W5: return 5;
+    default:
+      // Lotus, Orchid, Rock, Wheel, Boat, Knotweed:
+      // if they arrange at all, treat them as "no intrinsic limit"
+      return null;
+  }
+}
+
+/**
+ * Validate an arrange path.
+ * - Path is a list of 1-based indices.
+ * - Each step must be 1-square orthogonal (no diagonals, no jumps).
+ * - You CANNOT pass through occupied intersections.
+ * - You MAY capture on the final square (enemy piece only).
+ * - Final garden colour must be legal for the moving tile.
+ */
 export function validateArrange(board: Board, fromIdx: number, path: number[]): ArrangeValidation {
   if (path.length === 0) {
     return { ok: false, reason: "empty path" };
@@ -211,22 +255,17 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
   const startPiece = unpackPiece(startPacked)!;
   const type = startPiece.type;
 
-  // Orchid trap rule: trapped pieces cannot move.
-  if (isTrappedByOrchid(board, fromIdx)) {
-    return { ok: false, reason: "tile is trapped by Orchid" };
-  }
-
   // Enforce numbered flower move ranges (3/4/5)
   const limit = maxArrangeSteps(type);
   if (limit !== null && path.length > limit) {
     return { ok: false, reason: `path too long for that tile (max ${limit})` };
   }
 
-  let { x: px, y: py } = xyOfIndex(fromIdx);
+  let { x: px, y: py } = coordsOf(fromIdx - 1);
 
   for (let i = 0; i < path.length; i++) {
     const idx = path[i];
-    const { x, y } = xyOfIndex(idx); // Board index → (x,y)
+    const { x, y } = coordsOf(idx - 1); // 1-based board index → 0-based coords index
     const isLast = (i === path.length - 1);
 
     const dx = x - px;
@@ -240,10 +279,21 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
       return { ok: false, reason: "Arrange must move in single-step increments." };
     }
 
-    // Cannot pass THROUGH any occupied intersection (including final).
     const occupant = board.getAtIndex(idx);
     if (occupant) {
-      return { ok: false, reason: `blocked at intermediate ${idx}` };
+      const occ = unpackPiece(occupant)!;
+      const moverOwner = startPiece.owner;
+
+      if (!isLast) {
+        // Can’t pass THROUGH any piece.
+        return { ok: false, reason: `blocked at intermediate ${idx}` };
+      }
+
+      // Last step: friendly piece → illegal, enemy piece → capture allowed.
+      if (occ.owner === moverOwner) {
+        return { ok: false, reason: "cannot land on a friendly piece" };
+      }
+      // enemy piece on final square is ok; capture will be done in applyPlannedArrange
     }
 
     // Garden-color legality ONLY on the final landing intersection.
