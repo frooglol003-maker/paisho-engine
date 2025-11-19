@@ -498,89 +498,145 @@ function playerCanPlant(b: Board, side: Side): boolean {
 }
 
 async function handleBonusAccent(
+async function handleBonusAccent(
   b: Board,
   side: Side,
   ask: (q: string) => Promise<string>
 ) {
-  const ownerEnum = side === "host" ? Owner.Host : Owner.Guest;
+  const myOwner = side === "host" ? Owner.Host : Owner.Guest;
 
-  // What accents are still available for this side?
-  const rem  = remainingFromBoard(b);
-  const pool = side === "host" ? rem.host : rem.guest;
+  // 1) Ask which accent type (Rock, Wheel, Boat, Knotweed)
+  console.log("Available accents: Rock, Wheel, Boat, Knotweed");
+  let chosen: string | null = null;
 
-  const ACCENTS: { name: string; type: TypeId }[] = [
-    { name: "Rock",     type: TypeId.Rock },
-    { name: "Wheel",    type: TypeId.Wheel },
-    { name: "Boat",     type: TypeId.Boat },
-    { name: "Knotweed", type: TypeId.Knotweed },
-  ];
+  const ACCENTS = ["ROCK","WHEEL","BOAT","KNOTWEED"];
 
-  const available = ACCENTS.filter(a => (pool[a.name] ?? 0) > 0);
-
-  if (available.length === 0) {
-    console.log("No accents available; bonus skipped.");
-    return;
-  }
-
-  console.log(
-    "Available accents:",
-    available.map(a => a.name).join(", ")
-  );
-
-  // --- choose which accent type ---
-  let chosen: { name: string; type: TypeId } | null = null;
   while (!chosen) {
-    const ans = (await ask("Accent type (Rock/Wheel/Boat/Knotweed) > ")).trim().toLowerCase();
-    const match = available.find(a => a.name.toLowerCase() === ans);
-    if (!match) {
-      console.log("Please choose one of:", available.map(a => a.name).join(", "));
+    const ans = (await ask("Accent type (Rock/Wheel/Boat/Knotweed) > "))
+      .trim().toUpperCase();
+    if (!ACCENTS.includes(ans)) {
+      console.log("Please choose Rock, Wheel, Boat, or Knotweed.");
       continue;
     }
-    chosen = match;
+    chosen = ans;
   }
 
-  // --- choose where to place it ---
-  let x: number;
-  let y: number;
-  let idx: number;
+  const type = toTypeId(chosen);
 
-  while (true) {
-    const raw = (await ask("Accent position x,y > ")).trim();
+  // 2) Ask where to place the accent
+  let targetXY: { x: number; y: number } | null = null;
+  while (!targetXY) {
     try {
-      const c = xyFromString(raw);
-      x = c.x;
-      y = c.y;
-      idx = idx1(x, y);
+      const raw = await ask("Accent position x,y > ");
+      const { x, y } = xyFromString(raw.trim());
+      targetXY = { x, y };
     } catch {
-      console.log("Please enter coordinates as x,y (for example: 1,-1)");
-      continue;
-    }
-
-    if (b.getAtIndex(idx)) {
-      console.log("Illegal accent: intersection already occupied.");
-      continue;
-    }
-
-    break;
-  }
-
-  // Place the accent tile
-  b.setAtIndex(idx, packPiece(chosen.type, ownerEnum));
-  console.log("Bonus accent placed.");
-
-  // --- SPECIAL: Wheel spins immediately once on placement ---
-  if (chosen.type === TypeId.Wheel) {
-    try {
-      // Re-use the normal wheel move so clash checks etc still apply
-      const mv = { kind: "wheel", center: idx };
-      const nb = applyAnyMove(b, side, mv);
-      copyBoard(b, nb);
-    } catch (e: any) {
-      console.log(`Wheel spin failed: ${e?.message ?? e}`);
+      console.log("Bad coord. Use x,y");
     }
   }
 
-  console.log(boardWithSidebar(b));
+  const targetIdx = idx1(targetXY.x, targetXY.y);
+  const occupant = b.getAtIndex(targetIdx);
+
+  // ---------------------------------------------
+  // CASE A: target has an ACCENT → remove both
+  // ---------------------------------------------
+  if (occupant) {
+    const piece = unpackPiece(occupant)!;
+
+    const isAccent =
+      piece.type === TypeId.Rock ||
+      piece.type === TypeId.Wheel ||
+      piece.type === TypeId.Boat ||
+      piece.type === TypeId.Knotweed;
+
+    if (isAccent) {
+      // remove both (boat-accent behavior)
+      const myAccentIdx = targetIdx; // place my accent here
+    
+      // remove the occupant and remove nothing else for now
+      b.setAtIndex(targetIdx, 0);
+
+      // consume my accent → placed but inert (so place it)
+      b.setAtIndex(targetIdx, packPiece(type, myOwner));
+
+      console.log("Accent applied (accent-on-accent).");
+      console.log(boardWithSidebar(b));
+      return;
+    }
+  }
+
+  // ---------------------------------------------
+  // CASE B: target has a FLOWER → boat-on-flower
+  // ---------------------------------------------
+  if (occupant) {
+    const piece = unpackPiece(occupant)!;
+
+    const isFlower =
+      piece.type === TypeId.R3 ||
+      piece.type === TypeId.R4 ||
+      piece.type === TypeId.R5 ||
+      piece.type === TypeId.W3 ||
+      piece.type === TypeId.W4 ||
+      piece.type === TypeId.W5 ||
+      piece.type === TypeId.Lotus ||
+      piece.type === TypeId.Orchid;
+
+    if (isFlower) {
+      // Move target flower to a surrounding coordinate
+
+      const { x, y } = targetXY;
+      const adj = [
+        { x: x-1, y: y+1}, { x,   y: y+1 }, { x+1, y: y+1},
+        { x+1, y     },                   { x+1, y: y-1},
+        { x,   y: y-1}, { x-1, y: y-1}, { x-1, y }
+      ];
+
+      const legalAdj = adj.filter(({x,y}) => indexOf(x,y) !== -1);
+
+      console.log("Adjacent squares:");
+      legalAdj.forEach(({x,y}) => console.log(` (${x},${y})`));
+
+      let dest: { x: number; y: number } | null = null;
+      while (!dest) {
+        try {
+          const raw = await ask("Move flower to which adjacent x,y? > ");
+          const xy = xyFromString(raw.trim());
+          if (!legalAdj.some(a => a.x === xy.x && a.y === xy.y)) {
+            console.log("Not adjacent.");
+            continue;
+          }
+          const idx = idx1(xy.x, xy.y);
+          if (b.getAtIndex(idx)) {
+            console.log("Destination occupied.");
+            continue;
+          }
+          dest = xy;
+        } catch {
+          console.log("Bad coord.");
+        }
+      }
+
+      const fromIdx = targetIdx;
+      const toIdx   = idx1(dest.x, dest.y);
+
+      // Move flower
+      b.setAtIndex(fromIdx, 0);
+      b.setAtIndex(toIdx, occupant);
+
+      // Place my accent (consumed) onto target
+      b.setAtIndex(targetIdx, packPiece(type, myOwner));
+
+      console.log("Boat-accent (flower move) applied.");
+      console.log(boardWithSidebar(b));
+      return;
+    }
+  }
+
+  // ---------------------------------------------
+  // CASE C: empty square → illegal
+  // ---------------------------------------------
+  console.log("Illegal accent: must target a flower or an accent.");
 }
 
 // Bonus: plant a flower into ANY empty gate
