@@ -6,7 +6,7 @@
 import * as fs from "fs";
 import * as readline from "readline";
 import { Board, TypeId, Owner, unpackPiece, packPiece } from "./board";
-import { indexOf } from "./coords";
+import { coordsOf, indexOf } from "./coords";
 import { planWheelRotate, planBoatOnFlower, planBoatOnAccent } from "./rules";
 import { validateArrange } from "./move";
 import { applyPlannedArrange } from "./engine";
@@ -119,30 +119,66 @@ export function applyArrangeXY(
   return applyArrange(board, side, from, path);
 }
 
-// ----- Wheel (index-based): plan then apply rotation (no mutation of original)
-// Rotate all pieces in the 8-neighborhood one step clockwise.
-export function applyWheel(
-  board: Board,
-  _side: "host" | "guest",
-  centerIdx1: number
-): Board {
-  const plan = planWheelRotate(board, centerIdx1);
-  if (!plan.ok) {
-    throw new Error(`Illegal wheel: ${plan.reason}`);
+/**
+ * Wheel: move all adjacent pieces one step clockwise around the wheel.
+ * - Center stays where it is.
+ * - We look at up to 8 surrounding squares in this order:
+ *   N, NE, E, SE, S, SW, W, NW
+ * - Only on-board neighbors are used (off-board positions are ignored).
+ */
+export function applyWheel(board: Board, _side: any, centerIdx1: number): Board {
+  const result = new Board();
+  const N = (board as any).size1Based ?? 249;
+
+  // Copy board
+  for (let i = 1; i <= N; i++) {
+    result.setAtIndex(i, board.getAtIndex(i) || 0);
   }
 
-  const result = board.clone();
-
-  // Clear all source squares first so we don't overwrite as we go.
-  for (const mv of plan.moves) {
-    result.setAtIndex(mv.from, 0);
+  const centerXY = coordsOf(centerIdx1 - 1) as { x: number; y: number } | undefined;
+  if (!centerXY) {
+    throw new Error(`Wheel center ${centerIdx1} is off-board.`);
   }
 
-  // Now write each piece to its destination.
-  for (const mv of plan.moves) {
-    const p = board.getAtIndex(mv.from);
-    if (p) result.setAtIndex(mv.to, p);
+  const { x: cx, y: cy } = centerXY;
+
+  // Clockwise ring around the center: N, NE, E, SE, S, SW, W, NW
+  const dirs = [
+    { dx: 0,  dy:  1 },  // N
+    { dx: 1,  dy:  1 },  // NE
+    { dx: 1,  dy:  0 },  // E
+    { dx: 1,  dy: -1 },  // SE
+    { dx: 0,  dy: -1 },  // S
+    { dx: -1, dy: -1 },  // SW
+    { dx: -1, dy:  0 },  // W
+    { dx: -1, dy:  1 },  // NW
+  ];
+
+  const ringIdx: number[] = [];
+
+  for (const { dx, dy } of dirs) {
+    const x = cx + dx;
+    const y = cy + dy;
+    const i0 = indexOf(x, y);
+    if (i0 >= 0) {
+      ringIdx.push(i0 + 1); // convert to 1-based
+    }
   }
+
+  if (ringIdx.length === 0) {
+    // Nothing around the wheel to rotate
+    return result;
+  }
+
+  // Grab current values in the ring
+  const vals = ringIdx.map(i => result.getAtIndex(i) || 0);
+
+  // Rotate them one step clockwise
+  const last = vals[vals.length - 1];
+  for (let k = vals.length - 1; k > 0; k--) {
+    result.setAtIndex(ringIdx[k], vals[k - 1]);
+  }
+  result.setAtIndex(ringIdx[0], last);
 
   return result;
 }
