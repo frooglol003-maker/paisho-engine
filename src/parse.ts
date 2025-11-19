@@ -1,15 +1,15 @@
 // src/parse.ts
 // Parse & apply high-ELO game records to Board states.
 // Supports setup placements, Arrange paths, Wheel rotation, Boat-on-flower, Boat-on-accent.
-// Also supports XY-friendly actions to avoid index guesswork.
+// Now also supports XY-friendly actions to avoid index guesswork.
 
 import * as fs from "fs";
 import * as readline from "readline";
 import { Board, TypeId, Owner, unpackPiece, packPiece } from "./board";
 import { coordsOf, indexOf } from "./coords";
-import { planBoatOnFlower, planBoatOnAccent } from "./rules";
 import { validateArrange } from "./move";
 import { applyPlannedArrange } from "./engine";
+import { getGardenType, isGateCoord } from "./rules";
 
 // ====== Types ======
 export type Side = "host" | "guest";
@@ -25,17 +25,17 @@ export type Placement = {
 
 // Index-based actions (backward compatible)
 export type ActionIndex =
-  | { kind: "arrange"; side: Side; from: number; path: number[] } // indices 1-based
-  | { kind: "wheel"; side: Side; center: number }
-  | { kind: "boatFlower"; side: Side; boat: number; from: number; to: number }
-  | { kind: "boatAccent"; side: Side; boat: number; target: number };
+  | { kind: "arrange";     side: Side; from: number; path: number[] } // indices 1-based
+  | { kind: "wheel";       side: Side; center: number }
+  | { kind: "boatFlower";  side: Side; boat: number; from: number; to: number }
+  | { kind: "boatAccent";  side: Side; boat: number; target: number };
 
 // XY-based actions (new)
 export type ActionXY =
-  | { kind: "arrangeXY"; side: Side; fromXY: [number, number]; pathXY: [number, number][] }
-  | { kind: "wheelXY"; side: Side; centerXY: [number, number] }
-  | { kind: "boatFlowerXY"; side: Side; boatXY: [number, number]; fromXY: [number, number]; toXY: [number, number] }
-  | { kind: "boatAccentXY"; side: Side; boatXY: [number, number]; targetXY: [number, number] };
+  | { kind: "arrangeXY";     side: Side; fromXY: [number, number]; pathXY: [number, number][] }
+  | { kind: "wheelXY";       side: Side; centerXY: [number, number] }
+  | { kind: "boatFlowerXY";  side: Side; boatXY: [number, number]; fromXY: [number, number]; toXY: [number, number] }
+  | { kind: "boatAccentXY";  side: Side; boatXY: [number, number]; targetXY: [number, number] };
 
 // Union of all accepted actions
 export type Action = ActionIndex | ActionXY;
@@ -99,14 +99,14 @@ export function applySetup(board: Board, setup?: Placement[]) {
   }
 }
 
-// ----- Arrange (index-based) via validator + apply -----
+// ----- Arrange (index-based) via validator + apply
 export function applyArrange(board: Board, _side: Side, from: number, path: number[]) {
   const ok = validateArrange(board, from, path);
   if (!ok.ok) throw new Error(`arrange invalid: ${ok.reason ?? "unknown"}`);
   return applyPlannedArrange(board, { from, path });
 }
 
-// ----- Arrange (XY-based) convenience wrapper -----
+// ----- Arrange (XY-based) convenience wrapper
 export function applyArrangeXY(
   board: Board,
   side: Side,
@@ -118,14 +118,32 @@ export function applyArrangeXY(
   return applyArrange(board, side, from, path);
 }
 
-// ====== Wheel ======
+// ====== Wheel logic ======
+
 // Rotate the 8 surrounding intersections (king ring) clockwise.
 // Also enforce:
 //  - Illegal if any neighbor is a Rock
 //  - Illegal if any neighbor is a flower that is in a gate
+function isFlowerType(t: TypeId): boolean {
+  return (
+    t === TypeId.R3 ||
+    t === TypeId.R4 ||
+    t === TypeId.R5 ||
+    t === TypeId.W3 ||
+    t === TypeId.W4 ||
+    t === TypeId.W5 ||
+    t === TypeId.Lotus ||
+    t === TypeId.Orchid
+  );
+}
+
+function isGateXY(x: number, y: number): boolean {
+  return isGateCoord(x, y);
+}
+
 export function applyWheel(
   board: Board,
-  _side: Side,
+  _side: any,          // CLI doesn't need the side here
   centerIdx1: number
 ): Board {
   const centerXY = coordsOf(centerIdx1 - 1);
@@ -149,15 +167,6 @@ export function applyWheel(
     return i0 === -1 ? null : i0 + 1;
   });
 
-  const isGate = (x: number, y: number) =>
-    (x === 0 && (y === 8 || y === -8)) ||
-    (y === 0 && (x === 8 || x === -8));
-
-  const isFlower = (t: TypeId) =>
-    t === TypeId.R3 || t === TypeId.R4 || t === TypeId.R5 ||
-    t === TypeId.W3 || t === TypeId.W4 || t === TypeId.W5 ||
-    t === TypeId.Lotus || t === TypeId.Orchid;
-
   // --- Legality checks ---
   for (let i = 0; i < idxs.length; i++) {
     const idx1 = idxs[i];
@@ -175,7 +184,7 @@ export function applyWheel(
     }
 
     // 2) Illegal if moving a flower that is currently in a gate
-    if (isGate(x, y) && isFlower(p.type)) {
+    if (isGateXY(x, y) && isFlowerType(p.type)) {
       throw new Error("Illegal wheel: cannot move a flower in a gate.");
     }
   }
@@ -197,51 +206,115 @@ export function applyWheel(
     board.setAtIndex(idx1, rotated[i]);
   }
 
-  // Wheel piece itself just stays where it is; its "one-time ability" is enforced elsewhere.
   return board;
 }
 
-// ----- Wheel (XY-based) -----
-export function applyWheelXY(board: Board, side: Side, centerXY: [number, number]) {
+// ----- Wheel (XY-based)
+export function applyWheelXY(board: Board, _side: Side, centerXY: [number, number]) {
   const center = xyToIndex1(centerXY[0], centerXY[1]);
-  return applyWheel(board, side, center);
+  return applyWheel(board, _side, center);
 }
 
-// ====== Boat-on-flower ======
-// Boat moves a flower to one of the 8 surrounding spaces (adjacent king move).
-// Boat itself stays on the board (inert after use).
+// ====== Boat logic ======
+
+function isFlowerPieceType(t: TypeId): boolean {
+  return (
+    t === TypeId.R3 ||
+    t === TypeId.R4 ||
+    t === TypeId.R5 ||
+    t === TypeId.W3 ||
+    t === TypeId.W4 ||
+    t === TypeId.W5 ||
+    t === TypeId.Lotus ||
+    t === TypeId.Orchid
+  );
+}
+
+function canFlowerStopAt(type: TypeId, x: number, y: number): boolean {
+  const g = getGardenType(x, y); // "red" | "white" | "neutral"
+  if (g === "neutral") return true;
+
+  const isRed = type === TypeId.R3 || type === TypeId.R4 || type === TypeId.R5;
+  const isWhite = type === TypeId.W3 || type === TypeId.W4 || type === TypeId.W5;
+
+  if (g === "red" && isWhite) return false;
+  if (g === "white" && isRed) return false;
+
+  // Lotus / Orchid are allowed anywhere
+  return true;
+}
+
+/**
+ * Boat-on-flower:
+ *  - boat stays where it is (one-time use, inert afterward)
+ *  - from and to must both be among the 8 neighbors of the boat
+ *  - from must contain a flower
+ *  - to must be empty
+ *  - final landing must be garden-legal for that flower
+ */
 export function applyBoatFlower(
   board: Board,
   _side: Side,
-  _boat: number, // kept for signature parity; rules layer decides which boat is used
-  from: number,
-  to: number
-) {
-  const plan = planBoatOnFlower(board, from, to);
-  if (!plan.ok) throw new Error(`boatFlower invalid: ${plan.reason}`);
+  boatIdx1: number,
+  fromIdx1: number,
+  toIdx1: number
+): Board {
+  const boatXY = coordsOf(boatIdx1 - 1);
+  if (!boatXY) throw new Error("invalid boat index");
+  const { x: bx, y: by } = boatXY;
 
-  const fromXY = coordsOf(from - 1);
-  const toXY   = coordsOf(to - 1);
-  if (!fromXY || !toXY) throw new Error("boatFlower: bad from/to index");
+  const ring = [
+    { x: bx - 1, y: by + 1 },
+    { x: bx,     y: by + 1 },
+    { x: bx + 1, y: by + 1 },
+    { x: bx + 1, y: by     },
+    { x: bx + 1, y: by - 1 },
+    { x: bx,     y: by - 1 },
+    { x: bx - 1, y: by - 1 },
+    { x: bx - 1, y: by     },
+  ];
 
-  const dx = Math.abs(toXY.x - fromXY.x);
-  const dy = Math.abs(toXY.y - fromXY.y);
-  if ((dx === 0 && dy === 0) || dx > 1 || dy > 1) {
-    throw new Error("boatFlower: destination must be one of the 8 surrounding intersections.");
-  }
+  const ringIdxs = ring.map(({ x, y }) => {
+    const i0 = indexOf(x, y);
+    return i0 === -1 ? null : i0 + 1;
+  });
+
+  const isInRing = (idx1: number) => ringIdxs.some(i => i === idx1);
+
+  if (!isInRing(fromIdx1)) throw new Error("boatFlower: 'from' must be adjacent to boat");
+  if (!isInRing(toIdx1))   throw new Error("boatFlower: 'to' must be adjacent to boat");
+  if (fromIdx1 === toIdx1) throw new Error("boatFlower: from and to must differ");
 
   const cloned = board.clone();
-  const piece = cloned.getAtIndex(from);
-  const dest  = cloned.getAtIndex(to);
-  if (!piece) throw new Error("boatFlower: no piece at 'from'");
-  if (dest) throw new Error("boatFlower: target occupied");
 
-  cloned.setAtIndex(from, 0);
-  cloned.setAtIndex(to, piece);
+  const fromPacked = cloned.getAtIndex(fromIdx1);
+  if (!fromPacked) throw new Error("boatFlower: no piece at 'from'");
+  const fromPiece = unpackPiece(fromPacked)!;
+
+  if (!isFlowerPieceType(fromPiece.type)) {
+    throw new Error("boatFlower: can only move flowers");
+  }
+
+  const toPacked = cloned.getAtIndex(toIdx1);
+  if (toPacked) {
+    throw new Error("boatFlower: 'to' must be empty");
+  }
+
+  const toXY = coordsOf(toIdx1 - 1);
+  if (!toXY) throw new Error("boatFlower: invalid 'to' coordinate");
+
+  if (!canFlowerStopAt(fromPiece.type, toXY.x, toXY.y)) {
+    throw new Error("boatFlower: flower cannot stop on that garden");
+  }
+
+  // Move the flower; boat stays put.
+  cloned.setAtIndex(fromIdx1, 0);
+  cloned.setAtIndex(toIdx1, fromPacked);
+
   return cloned;
 }
 
-// ----- Boat-on-flower (XY-based) -----
+// ----- Boat-on-flower (XY-based)
 export function applyBoatFlowerXY(
   board: Board,
   side: Side,
@@ -249,45 +322,91 @@ export function applyBoatFlowerXY(
   fromXY: [number, number],
   toXY: [number, number]
 ) {
-  // boatXY is present for parity / logging; movement uses from/to
-  const _boat = xyToIndex1(boatXY[0], boatXY[1]);
-  const from  = xyToIndex1(fromXY[0], fromXY[1]);
-  const to    = xyToIndex1(toXY[0], toXY[1]);
-  return applyBoatFlower(board, side, _boat, from, to);
+  const boat = xyToIndex1(boatXY[0], boatXY[1]);
+  const from = xyToIndex1(fromXY[0], fromXY[1]);
+  const to   = xyToIndex1(toXY[0],  toXY[1]);
+  return applyBoatFlower(board, side, boat, from, to);
 }
 
-// ====== Boat-on-accent ======
-// Removes BOTH the boat and the target accent (one-time use).
+// Accent tiles = Rock, Wheel, Knotweed, Boat itself.
+function isAccentType(t: TypeId): boolean {
+  return t === TypeId.Rock || t === TypeId.Wheel || t === TypeId.Boat || t === TypeId.Knotweed;
+}
+
+/**
+ * Boat-on-accent:
+ *  - target must be one of the 8 neighbors of the boat
+ *  - target must be an accent tile (Rock/Wheel/Boat/Knotweed)
+ *  - removes BOTH the boat and the target accent
+ *  - rest of legality (clash, etc.) is handled by detectAnyClash in play.ts
+ */
 export function applyBoatAccent(
   board: Board,
   _side: Side,
-  boat: number,
-  target: number
-) {
-  const res = planBoatOnAccent(board, target, boat);
-  if (!res.ok) throw new Error(`boatAccent invalid: ${res.reason}`);
+  boatIdx1: number,
+  targetIdx1: number
+): Board {
+  const boatXY = coordsOf(boatIdx1 - 1);
+  if (!boatXY) throw new Error("boatAccent: invalid boat index");
+
+  const { x: bx, y: by } = boatXY;
+
+  const ring = [
+    { x: bx - 1, y: by + 1 },
+    { x: bx,     y: by + 1 },
+    { x: bx + 1, y: by + 1 },
+    { x: bx + 1, y: by     },
+    { x: bx + 1, y: by - 1 },
+    { x: bx,     y: by - 1 },
+    { x: bx - 1, y: by - 1 },
+    { x: bx - 1, y: by     },
+  ];
+
+  const ringIdxs = ring.map(({ x, y }) => {
+    const i0 = indexOf(x, y);
+    return i0 === -1 ? null : i0 + 1;
+  });
+
+  if (!ringIdxs.some(i => i === targetIdx1)) {
+    throw new Error("boatAccent: target must be adjacent to boat");
+  }
+
+  const boatPacked = board.getAtIndex(boatIdx1);
+  if (!boatPacked) throw new Error("boatAccent: no boat at given index");
+  const boatPiece = unpackPiece(boatPacked)!;
+  if (boatPiece.type !== TypeId.Boat) {
+    throw new Error("boatAccent: source piece is not a Boat");
+  }
+
+  const targetPacked = board.getAtIndex(targetIdx1);
+  if (!targetPacked) throw new Error("boatAccent: no piece at target");
+  const targetPiece = unpackPiece(targetPacked)!;
+
+  if (!isAccentType(targetPiece.type)) {
+    throw new Error("boatAccent: target is not an accent tile");
+  }
 
   const cloned = board.clone();
-  // planBoatOnAccent tells us exactly which indices to clear.
-  for (const r of res.remove) {
-    cloned.setAtIndex(r.remove, 0);
-  }
+  // Remove BOTH boat and accent.
+  cloned.setAtIndex(boatIdx1, 0);
+  cloned.setAtIndex(targetIdx1, 0);
+
   return cloned;
 }
 
-// ----- Boat-on-accent (XY-based) -----
+// ----- Boat-on-accent (XY-based)
 export function applyBoatAccentXY(
   board: Board,
   side: Side,
   boatXY: [number, number],
   targetXY: [number, number]
 ) {
-  const boat   = xyToIndex1(boatXY[0], boatXY[1]);
+  const boat   = xyToIndex1(boatXY[0],   boatXY[1]);
   const target = xyToIndex1(targetXY[0], targetXY[1]);
   return applyBoatAccent(board, side, boat, target);
 }
 
-// ====== Apply any action ======
+// ----- Apply any action -----
 export function applyAction(board: Board, action: Action): Board {
   switch (action.kind) {
     // Index-based
@@ -309,14 +428,13 @@ export function applyAction(board: Board, action: Action): Board {
   }
 }
 
-// ====== Load JSONL file -> GameRecord[] (with line numbers on errors) ======
+// Load JSONL file -> GameRecord[] (with line numbers on errors)
 export async function loadGames(jsonlPath: string): Promise<GameRecord[]> {
   const games: GameRecord[] = [];
   const rl = readline.createInterface({
     input: fs.createReadStream(jsonlPath, { encoding: "utf8" }),
     crlfDelay: Infinity,
   });
-
   let lineNo = 0;
   for await (const line of rl) {
     lineNo++;
@@ -329,6 +447,10 @@ export async function loadGames(jsonlPath: string): Promise<GameRecord[]> {
         `JSONL parse error at ${jsonlPath}:${lineNo}\nLine: ${trimmed}\n${e.message}`
       );
     }
+  }
+  return games;
+}
+
   }
   return games;
 }
