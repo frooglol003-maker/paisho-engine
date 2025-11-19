@@ -252,19 +252,40 @@ function safeXY(idx1Val: number): string {
   }
 }
 
-function countsToLines(label: string, m: CountMap, color: string): string[] {
-  const rows: string[] = [];
-  rows.push(`${BOLD}${color}${label}${RESET}`);
-  let any = false;
-  for (const [, key] of PIECE_KEYS) {
-    const v = m[key] ?? 0;
-    if (v !== 0) {
-      any = true;
-      rows.push(`${color}${key.padEnd(8)} ${BOLD}${String(v).padStart(2)}${RESET}`);
-    }
+// ---------- Helper conversions (needed by play.ts) ----------
+function toTypeId(name: string): TypeId {
+  const normalized = name.trim().toUpperCase();
+  switch (normalized) {
+    case "R3": return TypeId.R3;
+    case "R4": return TypeId.R4;
+    case "R5": return TypeId.R5;
+    case "W3": return TypeId.W3;
+    case "W4": return TypeId.W4;
+    case "W5": return TypeId.W5;
+    case "LOTUS": return TypeId.Lotus;
+    case "ORCHID": return TypeId.Orchid;
+    case "ROCK": return TypeId.Rock;
+    case "WHEEL": return TypeId.Wheel;
+    case "BOAT": return TypeId.Boat;
+    case "KNOTWEED": return TypeId.Knotweed;
+    default:
+      throw new Error(`Unknown piece type: ${name}`);
   }
-  if (!any) rows.push(`${DIM}(none)${RESET}`);
-  return rows;
+}
+
+function toOwner(name: string): Owner {
+  const n = name.trim().toLowerCase();
+  if (n === "host" || n === "h") return Owner.Host;
+  if (n === "guest" || n === "g") return Owner.Guest;
+  throw new Error(`Unknown owner: ${name}`);
+}
+
+function isWhiteFlower(type: TypeId): boolean {
+  return type === TypeId.W3 || type === TypeId.W4 || type === TypeId.W5;
+}
+
+function isRedFlower(type: TypeId): boolean {
+  return type === TypeId.R3 || type === TypeId.R4 || type === TypeId.R5;
 }
 
 // ---------- Board renderer (flipped so y=+8 is at top visually) ----------
