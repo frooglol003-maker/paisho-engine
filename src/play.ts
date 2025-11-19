@@ -121,6 +121,46 @@ const BG_RED     = BG(166); // red
 const BG_WHITE   = BG(230); // light wood
 const BG_GATE    = BG(34);  // green
 
+// Bright cyan for harmony “wires” between pieces
+const FG_HARMONY = FG(51);
+
+/**
+ * Compute all board indices (1-based) that lie on an active harmony segment
+ * between two tiles of the same side. We mark the EMPTY intersections in
+ * between them so the UI can draw a bright line.
+ */
+function computeHarmonySegments(board: Board): Set<number> {
+  const segs = new Set<number>();
+  const edges = listHarmonyEdges(board);
+
+  for (const e of edges) {
+    const a = coordsOf(e.aIdx1 - 1);
+    const b = coordsOf(e.bIdx1 - 1);
+    if (!a || !b) continue;
+
+    // Same file (vertical)
+    if (a.x === b.x) {
+      const x = a.x;
+      const step = a.y < b.y ? 1 : -1;
+      for (let y = a.y + step; y !== b.y; y += step) {
+        const i0 = indexOf(x, y);
+        if (i0 !== -1) segs.add(i0 + 1);
+      }
+    }
+    // Same rank (horizontal)
+    else if (a.y === b.y) {
+      const y = a.y;
+      const step = a.x < b.x ? 1 : -1;
+      for (let x = a.x + step; x !== b.x; x += step) {
+        const i0 = indexOf(x, y);
+        if (i0 !== -1) segs.add(i0 + 1);
+      }
+    }
+  }
+
+  return segs;
+}
+
 function countsToLines(label: string, m: CountMap, color: string): string[] {
   const rows: string[] = [];
   rows.push(`${BOLD}${color}${label}${RESET}`);
@@ -308,6 +348,7 @@ function boardViolatesGarden(board: Board): boolean {
 
 // ---------- Board renderer (flipped so y=+8 is at top visually) ----------
 function boardWithSidebar(board: Board): string {
+  const harmonySegs = computeHarmonySegments(board);
   const widths = [9,11,13,15, 17,17,17,17,17,17,17,17,17, 15,13,11,9];
   const rowStarts: number[] = [];
   let base = 1;
@@ -359,8 +400,10 @@ function boardWithSidebar(board: Board): string {
       }
       const { x, y } = xy;
       const bg = cellBg(x, y);
-      if (!p) {
-        cells.push(`${bg}${GRID_DOT}· ${RESET}`);
+           if (!p) {
+        const onHarmony = harmonySegs.has(idx);
+        const dotColor = onHarmony ? FG_HARMONY : GRID_DOT;
+        cells.push(`${bg}${dotColor}· ${RESET}`);
       } else {
         const d = unpackPiece(p)!;
         const fg = d.owner === Owner.Host ? FG_HOST : FG_GUEST;
@@ -1132,22 +1175,17 @@ async function main() {
 
         // AFTER the move, look at harmonies involving the piece at its new index
         const movedIdx = lastIdx;
-        const afterEdgesAll = (listHarmonyEdges(b) as HarmonyEdgeLite[]).filter(
+               // --- harmony bonus detection (only for the moving side) ---
+        const afterEdges = (listHarmonyEdges(b) as HarmonyEdgeLite[]).filter(
           e => e.owner === toMove
         );
 
-        let newHarmony = false;
-        for (const e of afterEdgesAll) {
-          if (e.aIdx1 === movedIdx) {
-            const partner = e.bIdx1;
-            if (!beforePartners.has(partner)) { newHarmony = true; break; }
-          } else if (e.bIdx1 === movedIdx) {
-            const partner = e.aIdx1;
-            if (!beforePartners.has(partner)) { newHarmony = true; break; }
-          }
-        }
+        const beforeCount = beforeEdges.length;
+        const afterCount  = afterEdges.length;
 
-        // Only one bonus per move, and only for the human side
+        // Rule: you only get a bonus if your total number of harmonies increased.
+        const newHarmony = afterCount > beforeCount;
+
         if (newHarmony && toMove === HUMAN) {
           await handleHarmonyBonus(b, toMove, ask);
         }
