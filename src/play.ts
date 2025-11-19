@@ -1004,7 +1004,7 @@ async function main() {
         continue;
       }
 
-      // Arrange:
+        // Arrange:
       // - If you give multiple waypoints, we use them literally.
       // - If you give a single destination, we auto-build a Manhattan path.
       //   We try H-then-V, and if that hits a block, we try V-then-H.
@@ -1019,8 +1019,9 @@ async function main() {
         const parts = rhs.split(";").map(p => p.trim()).filter(Boolean);
         if (parts.length === 0) throw new Error("Empty path");
 
-        // Capture harmony edges BEFORE move (for the side that is moving)
-        const beforeEdges = (listHarmonyEdges(b) as HarmonyEdgeLite[]).filter(
+        // Capture harmony edges BEFORE move (for this side),
+        // so we can see which partners the moving piece already had.
+        const beforeEdgesAll = (listHarmonyEdges(b) as HarmonyEdgeLite[]).filter(
           e => e.owner === toMove
         );
 
@@ -1120,19 +1121,33 @@ async function main() {
         const nb = applyAnyMove(b, toMove, mv);
         copyBoard(b, nb);
 
-        // --- harmony bonus detection (only for the moving side) ---
-        const afterEdges = (listHarmonyEdges(b) as HarmonyEdgeLite[]).filter(
+        // --- harmony bonus detection (ONLY edges involving the moved piece) ---
+
+        // Partners the moving piece was already harmonizing with BEFORE the move
+        const beforePartners = new Set<number>();
+        for (const e of beforeEdgesAll) {
+          if (e.aIdx1 === fromIdx) beforePartners.add(e.bIdx1);
+          else if (e.bIdx1 === fromIdx) beforePartners.add(e.aIdx1);
+        }
+
+        // AFTER the move, look at harmonies involving the piece at its new index
+        const movedIdx = lastIdx;
+        const afterEdgesAll = (listHarmonyEdges(b) as HarmonyEdgeLite[]).filter(
           e => e.owner === toMove
         );
 
-        const edgeKey = (e: { aIdx1: number; bIdx1: number }) =>
-          e.aIdx1 < e.bIdx1
-            ? `${e.aIdx1}-${e.bIdx1}`
-            : `${e.bIdx1}-${e.aIdx1}`;
+        let newHarmony = false;
+        for (const e of afterEdgesAll) {
+          if (e.aIdx1 === movedIdx) {
+            const partner = e.bIdx1;
+            if (!beforePartners.has(partner)) { newHarmony = true; break; }
+          } else if (e.bIdx1 === movedIdx) {
+            const partner = e.aIdx1;
+            if (!beforePartners.has(partner)) { newHarmony = true; break; }
+          }
+        }
 
-        const beforeSet = new Set(beforeEdges.map(edgeKey));
-        const newHarmony = afterEdges.some(e => !beforeSet.has(edgeKey(e)));
-
+        // Only one bonus per move, and only for the human side
         if (newHarmony && toMove === HUMAN) {
           await handleHarmonyBonus(b, toMove, ask);
         }
@@ -1141,6 +1156,7 @@ async function main() {
         console.log(boardWithSidebar(b));
         continue;
       }
+
 
       // Wheel
       if (lower.startsWith("wheel ")) {
