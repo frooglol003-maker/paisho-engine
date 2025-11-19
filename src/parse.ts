@@ -435,6 +435,7 @@ export async function loadGames(jsonlPath: string): Promise<GameRecord[]> {
     input: fs.createReadStream(jsonlPath, { encoding: "utf8" }),
     crlfDelay: Infinity,
   });
+
   let lineNo = 0;
   for await (const line of rl) {
     lineNo++;
@@ -447,10 +448,6 @@ export async function loadGames(jsonlPath: string): Promise<GameRecord[]> {
         `JSONL parse error at ${jsonlPath}:${lineNo}\nLine: ${trimmed}\n${e.message}`
       );
     }
-  }
-  return games;
-}
-
   }
   return games;
 }
