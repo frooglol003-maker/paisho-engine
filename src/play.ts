@@ -862,15 +862,17 @@ async function main() {
         copyBoard(b, nb);
         console.log(boardWithSidebar(b));
 
-        // ---- Harmony bonus detection (only for HUMAN side) ----
-        const afterEdges = listHarmonyEdges(b);
-        const beforeSet = new Set(beforeEdges.map(([a, b]) =>
-          `${Math.min(a, b)}-${Math.max(a, b)}`
-        ));
-        const newHarmony = afterEdges.some(([a, b]) => {
-          const k = `${Math.min(a, b)}-${Math.max(a, b)}`;
-          return !beforeSet.has(k);
-        });
+        const beforeEdges = listHarmonyEdges(b).filter(e => e.owner === toMove);
+        const afterEdges  = listHarmonyEdges(nb).filter(e => e.owner === toMove);
+
+        const edgeKey = (e: { aIdx1: number; bIdx1: number }) =>
+          e.aIdx1 < e.bIdx1
+            ? `${e.aIdx1}-${e.bIdx1}`
+            : `${e.bIdx1}-${e.aIdx1}`;
+        
+        const beforeSet = new Set(beforeEdges.map(edgeKey));
+        
+        const newHarmony = afterEdges.some(e => !beforeSet.has(edgeKey(e)));
 
         if (newHarmony && toMove === HUMAN) {
           await handleHarmonyBonus(b, toMove, ask);
