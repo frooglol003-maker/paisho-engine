@@ -1163,36 +1163,27 @@ async function main() {
         const mv = { kind: "arrange", from: fromIdx, path: pathIdx };
         const nb = applyAnyMove(b, toMove, mv);
         copyBoard(b, nb);
-
-        // --- harmony bonus detection (ONLY edges involving the moved piece) ---
-
-        // Partners the moving piece was already harmonizing with BEFORE the move
-        const beforePartners = new Set<number>();
-        for (const e of beforeEdgesAll) {
-          if (e.aIdx1 === fromIdx) beforePartners.add(e.bIdx1);
-          else if (e.bIdx1 === fromIdx) beforePartners.add(e.aIdx1);
-        }
-
-        // AFTER the move, look at harmonies involving the piece at its new index
-        const movedIdx = lastIdx;
-               // --- harmony bonus detection (only for the moving side) ---
-        const afterEdges = (listHarmonyEdges(b) as HarmonyEdgeLite[]).filter(
-          e => e.owner === toMove
-        );
-
-        const beforeCount = beforeEdges.length;
-        const afterCount  = afterEdges.length;
-
-        // Rule: you only get a bonus if your total number of harmonies increased.
-        const newHarmony = afterCount > beforeCount;
-
-        if (newHarmony && toMove === HUMAN) {
-          await handleHarmonyBonus(b, toMove, ask);
-        }
-
-        toMove = other(toMove);
-        console.log(boardWithSidebar(b));
-        continue;
+      // --- harmony bonus detection (only for the moving side) ---
+      
+      // BEFORE the move, we recorded:
+      const beforeCount = beforeEdgesAll.length;
+      
+      // AFTER the move:
+      const afterEdges = (listHarmonyEdges(b) as HarmonyEdgeLite[]).filter(
+        e => e.owner === toMove
+      );
+      const afterCount = afterEdges.length;
+      
+      // You get a bonus ONLY if your total harmony count increased
+      const newHarmony = afterCount > beforeCount;
+      
+      if (newHarmony && toMove === HUMAN) {
+        await handleHarmonyBonus(b, toMove, ask);
+      }
+      
+      toMove = other(toMove);
+      console.log(boardWithSidebar(b));
+      continue;
       }
 
 
