@@ -8,49 +8,45 @@ import { Board, unpackPiece, TypeId } from "./board";
 import {
   getPieceDescriptor,
   isClashPair,
-  ownerHasBloomingLotus,
   getGardenType,
   isGateCoord,
   isHarmonyActivePair,
   isTrappedByOrchid,
 } from "./rules";
-// ----- Local garden geometry to match CLI board colours -----
+
+// -----------------------------------------------------------------------------
+// Small helper: 1-based index → (x,y) using coordsOf(0-based)
+// -----------------------------------------------------------------------------
+function xyOfIndex(idx1: number): { x: number; y: number } {
+  if (!Number.isInteger(idx1) || idx1 < 1) {
+    throw new Error(`xyOfIndex: expected 1-based index, got ${idx1}`);
+  }
+  return coordsOf(idx1 - 1);
+}
+
+// -----------------------------------------------------------------------------
+// Garden helper for arrange legality
+// -----------------------------------------------------------------------------
 
 type GardenColour = "red" | "white" | "neutral";
 
 /**
- * Gardens (must match the ASCII board in play.ts):
- * - If x === 0 or y === 0 → neutral (midlines)
- * - If |x| + |y| < 7:
- *    - Quadrants 1 & 3 (x>0,y>0 or x<0,y<0) → red
- *    - Quadrants 2 & 4 (x<0,y>0 or x>0,y<0) → white
- * - Else → neutral
- * - Gates (±8,0) and (0,±8) are treated as neutral for color rules.
+ * Gardens for movement:
+ * - Delegates to rules.getGardenType for the diamond layout
+ * - We still treat gates specially: you cannot *stop* on a gate with Arrange.
  */
 function gardenAt(x: number, y: number): GardenColour {
-  // Gates are neutral for landing rules
-  if (isGateCoord(x, y)) return "neutral";
-
-  // Midlines are neutral
-  if (x === 0 || y === 0) return "neutral";
-
-  const manhattan = Math.abs(x) + Math.abs(y);
-  if (manhattan >= 7) return "neutral";
-
-  const q1 = x > 0 && y > 0;
-  const q2 = x < 0 && y > 0;
-  const q3 = x < 0 && y < 0;
-  // q4 is the remaining case
-
-  if (q1 || q3) return "red";   // quadrants 1 & 3
-  if (q2)        return "white"; // quadrant 2
-  return "white";               // quadrant 4
+  return getGardenType(x, y);
 }
 
 /* Utility to compute orthogonal neighbors (returns 1-based indices). */
 function orthogonalNeighborsIdx(idx1: number): number[] {
-  const c = coordsOf(idx1 - 1) as { x: number; y: number } | undefined;
-  if (!c) return [];  // invalid index → no neighbors
+  let c: { x: number; y: number };
+  try {
+    c = xyOfIndex(idx1);
+  } catch {
+    return [];
+  }
 
   const { x, y } = c;
   const candidates = [
@@ -66,11 +62,20 @@ function orthogonalNeighborsIdx(idx1: number): number[] {
   }
   return out;
 }
+
+// -----------------------------------------------------------------------------
+// Line-of-sight & clash
+// -----------------------------------------------------------------------------
+
 /* lineOfSightClear: true if orthogonal straight segment from a to b has no pieces and no gates between them */
 export function lineOfSightClear(board: Board, aIdx1: number, bIdx1: number): boolean {
-  const a = coordsOf(aIdx1 - 1) as any;
-  const b = coordsOf(bIdx1 - 1) as any;
-  if (!a || !b) return false; // invalid indices, treat as blocked
+  let a, b;
+  try {
+    a = xyOfIndex(aIdx1);
+    b = xyOfIndex(bIdx1);
+  } catch {
+    return false;
+  }
 
   if (a.x !== b.x && a.y !== b.y) return false;
   const dx = Math.sign(b.x - a.x);
@@ -98,8 +103,12 @@ export function detectAnyClash(board: Board): boolean {
     const pA = getPieceDescriptor(board, aIdx1);
     if (pA.kind !== "basic" || !pA.blooming) continue;
 
-    const aC = coordsOf(aIdx1 - 1) as any;
-    if (!aC) continue;
+    let aC: { x: number; y: number };
+    try {
+      aC = xyOfIndex(aIdx1);
+    } catch {
+      continue;
+    }
 
     for (let bIdx1 = 1; bIdx1 <= N; bIdx1++) {
       if (bIdx1 === aIdx1) continue;
@@ -107,8 +116,12 @@ export function detectAnyClash(board: Board): boolean {
       const pB = getPieceDescriptor(board, bIdx1);
       if (pB.kind !== "basic" || !pB.blooming) continue;
 
-      const bC = coordsOf(bIdx1 - 1) as any;
-      if (!bC) continue;
+      let bC: { x: number; y: number };
+      try {
+        bC = xyOfIndex(bIdx1);
+      } catch {
+        continue;
+      }
 
       // same axis?
       if (aC.x !== bC.x && aC.y !== bC.y) continue;
@@ -122,7 +135,9 @@ export function detectAnyClash(board: Board): boolean {
   return false;
 }
 
-/* ----- Arrange validation -------------------------------------------------- */
+// -----------------------------------------------------------------------------
+// Arrange validation
+// -----------------------------------------------------------------------------
 
 export type ArrangeValidation = { ok: true } | { ok: false; reason: string };
 
@@ -133,18 +148,35 @@ function isWhiteFlower(t: TypeId): boolean {
   return t === TypeId.W3 || t === TypeId.W4 || t === TypeId.W5;
 }
 
+/**
+ * Can a tile of this type legally *stop* on (x,y)?
+ * - We allow passing through any garden, including "wrong" color.
+ * - Final destination must:
+ *   - not be a gate
+ *   - respect red/white garden rules for R/W flowers
+ *   - neutral squares are always OK
+ *   - Lotus / Orchid / accents can end anywhere non-gate
+ */
 function canStopOnGarden(type: TypeId, x: number, y: number): boolean {
-  const g = gardenAt(x, y); // use local geometry, not rules.getGardenType
+  // Never stop on a gate with Arrange.
+  if (isGateCoord(x, y)) return false;
+
+  const g = gardenAt(x, y); // "red" | "white" | "neutral"
 
   if (g === "neutral") return true;
 
   if (g === "red" && isWhiteFlower(type)) return false;
   if (g === "white" && isRedFlower(type)) return false;
 
-  // Lotus / Orchid / accents can land anywhere
+  // Lotus / Orchid / accents can land anywhere (except gates).
   return true;
 }
 
+/**
+ * Maximum number of arrange *steps* for each tile type.
+ * Flowers obey 3/4/5; others are unlimited (null = no intrinsic cap),
+ * but move gen may still cap length.
+ */
 function maxArrangeSteps(t: TypeId): number | null {
   switch (t) {
     case TypeId.R3:
@@ -167,16 +199,22 @@ function maxArrangeSteps(t: TypeId): number | null {
  * - You CANNOT pass through occupied intersections (including the final dest).
  * - You MAY pass through “wrong-color” gardens; only the FINAL
  *   destination’s garden color must be legal for the tile.
+ * - If the starting tile is trapped by an enemy Orchid, the move is illegal.
  */
 export function validateArrange(board: Board, fromIdx: number, path: number[]): ArrangeValidation {
   if (path.length === 0) {
     return { ok: false, reason: "empty path" };
   }
 
-   const startPacked = board.getAtIndex(fromIdx);
+  const startPacked = board.getAtIndex(fromIdx);
   if (!startPacked) return { ok: false, reason: "no tile at start" };
   const startPiece = unpackPiece(startPacked)!;
   const type = startPiece.type;
+
+  // Orchid trap rule: trapped pieces cannot move.
+  if (isTrappedByOrchid(board, fromIdx)) {
+    return { ok: false, reason: "tile is trapped by Orchid" };
+  }
 
   // Enforce numbered flower move ranges (3/4/5)
   const limit = maxArrangeSteps(type);
@@ -184,11 +222,11 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
     return { ok: false, reason: `path too long for that tile (max ${limit})` };
   }
 
-  let { x: px, y: py } = coordsOf(fromIdx - 1);
+  let { x: px, y: py } = xyOfIndex(fromIdx);
 
   for (let i = 0; i < path.length; i++) {
     const idx = path[i];
-    const { x, y } = coordsOf(idx - 1); // 1-based board index → 0-based coords index
+    const { x, y } = xyOfIndex(idx); // Board index → (x,y)
     const isLast = (i === path.length - 1);
 
     const dx = x - px;
@@ -220,7 +258,9 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
   return { ok: true };
 }
 
-/* ----- Harmony graph & rings ---------------------------------------------- */
+// -----------------------------------------------------------------------------
+// Harmony graph & rings
+// -----------------------------------------------------------------------------
 
 /* Build harmony graph and detect rings.
    Nodes: blooming basic tiles;
@@ -242,7 +282,8 @@ export function buildHarmonyGraph(board: Board): Map<number, number[]> {
       const a = getPieceDescriptor(board, aIdx1) as any;
       const b = getPieceDescriptor(board, bIdx1) as any;
 
-      const aC = coordsOf(aIdx1 - 1), bC = coordsOf(bIdx1 - 1); // coords need 0-based
+      const aC = xyOfIndex(aIdx1);
+      const bC = xyOfIndex(bIdx1);
       if (aC.x !== bC.x && aC.y !== bC.y) continue;
       if (!lineOfSightClear(board, aIdx1, bIdx1)) continue;
 
@@ -301,7 +342,7 @@ export function findHarmonyRings(board: Board): number[][] {
 }
 
 function cycleEnclosesOrigin(cycle: number[]): boolean {
-  const pts = cycle.map((i1) => coordsOf(i1 - 1)); // coords need 0-based
+  const pts = cycle.map((i1) => xyOfIndex(i1));
   let inside = false;
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
     const xi = pts[i].x, yi = pts[i].y;
