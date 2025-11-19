@@ -467,85 +467,134 @@ function other(side: Side): Side {
   return side === "host" ? "guest" : "host";
 }
 
-// ---------- Harmony bonus helpers ----------
+// ---- Harmony bonus helpers (replace existing versions) ----
 
+// Can this side take the "plant" bonus?
+//  - Disallowed if the player already has ANY piece in ANY gate.
+//  - Also requires at least one empty gate on the board.
 function playerCanPlant(b: Board, side: Side): boolean {
-  // Bonus plant is allowed only if **this side** has no tiles in any gate.
-  const gateCoords = [
-    { x: 0, y: +BOARD_RADIUS },
-    { x: 0, y: -BOARD_RADIUS },
-    { x: +BOARD_RADIUS, y: 0 },
-    { x: -BOARD_RADIUS, y: 0 },
-  ];
-  const desiredOwner = side === "host" ? Owner.Host : Owner.Guest;
+  const myOwner = side === "host" ? Owner.Host : Owner.Guest;
 
-  for (const g of gateCoords) {
-    const i0 = indexOf(g.x, g.y);
-    if (i0 === -1) continue;
-    const idx1Val = i0 + 1;
-    const p = b.getAtIndex(idx1Val);
-    if (!p) continue;
-    const d = unpackPiece(p)!;
-    if (d.owner === desiredOwner) return false;
+  const gates = [
+    { x: 0,  y:  8 },
+    { x: 0,  y: -8 },
+    { x: -8, y:  0 },
+    { x: 8,  y:  0 },
+  ];
+
+  let hasOwnInGate = false;
+  let hasEmptyGate = false;
+
+  for (const g of gates) {
+    const idx = idx1(g.x, g.y);
+    const packed = b.getAtIndex(idx);
+    if (!packed) {
+      hasEmptyGate = true;
+      continue;
+    }
+    const dec = unpackPiece(packed)!;
+    if (dec.owner === myOwner) {
+      hasOwnInGate = true;
+    }
   }
-  return true;
+
+  if (hasOwnInGate) return false;
+  return hasEmptyGate;
 }
 
-async function handleBonusAccent(
+// Bonus “plant” flow: choose a flower type and any empty gate.
+async function handleBonusPlant(
   b: Board,
   side: Side,
   ask: (q: string) => Promise<string>
-) {
-  const rem = remainingFromBoard(b);
-  const pool = side === "host" ? rem.host : rem.guest;
+): Promise<void> {
+  const myOwner = side === "host" ? Owner.Host : Owner.Guest;
 
-  const allowed = ["Rock", "Wheel", "Boat", "Knotweed"] as const;
-  const available = allowed.filter(k => (pool[k] ?? 0) > 0);
-
-  if (available.length === 0) {
-    console.log("No accent tiles remaining; bonus wasted.");
+  // First, enforce the global “can plant?” condition
+  if (!playerCanPlant(b, side)) {
+    console.log("You cannot plant: you already have a tile in a gate or there is no empty gate.");
     return;
   }
 
-  console.log(`Available accents: ${available.join(", ")}`);
+  // 1) Which flower type?
+  const rem = remainingFromBoard(b);
+  const pool = side === "host" ? rem.host : rem.guest;
 
-  let type: TypeId;
-  while (true) {
-    const ans = (await ask("Accent type (Rock/Wheel/Boat/Knotweed) > ")).trim();
+  const FLOWER_KEYS = ["R3", "R4", "R5", "W3", "W4", "W5", "Lotus", "Orchid"] as const;
+  const available = FLOWER_KEYS.filter(k => (pool[k] ?? 0) > 0);
+
+  if (available.length === 0) {
+    console.log("No flowers remaining to plant.");
+    return;
+  }
+
+  console.log("Available flowers to plant:", available.join(", "));
+
+  let chosenType: TypeId | null = null;
+  while (!chosenType) {
+    const ans = (await ask("Plant which type? > ")).trim().toUpperCase();
+    if (!available.includes(ans as any)) {
+      console.log("Please choose one of:", available.join(", "));
+      continue;
+    }
     try {
-      type = toTypeId(ans);
+      chosenType = toTypeId(ans);
     } catch {
-      console.log("Unknown type. Try again.");
-      continue;
+      console.log("Unknown type, try again.");
     }
-    const key = keyForType(type);
-    if (!key || !available.includes(key as any)) {
-      console.log("You don't have any of that accent remaining.");
-      continue;
-    }
-    break;
   }
 
-  // Target coord
-  let targetIdx: number;
-  while (true) {
-    try {
-      const coordStr = await ask("Accent position x,y > ");
-      const { x, y } = xyFromString(coordStr);
-      targetIdx = idx1(x, y);
-      if (b.getAtIndex(targetIdx)) {
-        console.log("That intersection is occupied; pick another.");
-        continue;
-      }
+  // 2) Which gate? Now use ALL FOUR gates.
+  const ALL_GATES = [
+    { label: "A", x:  0, y:  8 },
+    { label: "B", x:  0, y: -8 },
+    { label: "C", x: -8, y:  0 },
+    { label: "D", x:  8, y:  0 },
+  ];
+
+  const emptyGates = ALL_GATES.filter(g => !b.getAtIndex(idx1(g.x, g.y)));
+
+  if (emptyGates.length === 0) {
+    console.log("No empty gates to plant into.");
+    return;
+  }
+
+  console.log("Available gates for bonus plant:");
+  for (const g of emptyGates) {
+    console.log(`  ${g.label}: (${g.x},${g.y})`);
+  }
+
+  let targetGate: { x: number; y: number } | null = null;
+  while (!targetGate) {
+    const raw = (await ask("Choose gate (A/B/C/D or coord x,y) > ")).trim();
+    if (!raw) continue;
+
+    const up = raw.toUpperCase();
+
+    // By label
+    const byLabel = emptyGates.find(g => g.label === up);
+    if (byLabel) {
+      targetGate = { x: byLabel.x, y: byLabel.y };
       break;
-    } catch (e: any) {
-      console.log(`Bad coord: ${e?.message ?? e}`);
+    }
+
+    // By coord
+    try {
+      const { x, y } = xyFromString(raw);
+      const byCoord = emptyGates.find(g => g.x === x && g.y === y);
+      if (byCoord) {
+        targetGate = { x: byCoord.x, y: byCoord.y };
+        break;
+      }
+      console.log("That coord is not an empty gate.");
+    } catch {
+      console.log("Please enter a gate letter (A/B/C/D) or coord x,y.");
     }
   }
 
-  b.setAtIndex(targetIdx, packPiece(type, side === "host" ? Owner.Host : Owner.Guest));
-  console.log("Bonus accent placed.");
-  console.log(boardWithSidebar(b));
+  const idx = idx1(targetGate!.x, targetGate!.y);
+  b.setAtIndex(idx, packPiece(chosenType!, myOwner));
+  console.log("Bonus plant applied.");
 }
 
 async function handleBonusPlant(
