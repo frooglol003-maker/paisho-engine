@@ -120,21 +120,31 @@ export function applyArrangeXY(
 }
 
 // ----- Wheel (index-based): plan then apply rotation (no mutation of original)
-export function applyWheel(board: Board, _side: Side, center: number) {
-  const plan = planWheelRotate(board, center);
-  if (!plan.ok) throw new Error(`wheel invalid: ${plan.reason}`);
-  const cloned = board.clone();
-  const pulled: { from: number; piece: number }[] = [];
-  for (const m of plan.moves) {
-    const p = cloned.getAtIndex(m.from);
-    if (p) pulled.push({ from: m.from, piece: p });
-    cloned.setAtIndex(m.from, 0);
+// Rotate all pieces in the 8-neighborhood one step clockwise.
+export function applyWheel(
+  board: Board,
+  _side: "host" | "guest",
+  centerIdx1: number
+): Board {
+  const plan = planWheelRotate(board, centerIdx1);
+  if (!plan.ok) {
+    throw new Error(`Illegal wheel: ${plan.reason}`);
   }
-  for (const m of plan.moves) {
-    const found = pulled.find(pp => pp.from === m.from)!;
-    cloned.setAtIndex(m.to, found.piece);
+
+  const result = board.clone();
+
+  // Clear all source squares first so we don't overwrite as we go.
+  for (const mv of plan.moves) {
+    result.setAtIndex(mv.from, 0);
   }
-  return cloned;
+
+  // Now write each piece to its destination.
+  for (const mv of plan.moves) {
+    const p = board.getAtIndex(mv.from);
+    if (p) result.setAtIndex(mv.to, p);
+  }
+
+  return result;
 }
 
 // ----- Wheel (XY-based)
