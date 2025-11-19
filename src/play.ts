@@ -676,7 +676,10 @@ async function main() {
       if (lower.startsWith("plant ")) {
         const typ = toTypeId(line.slice(6).trim());
         const g = gateFor(toMove), m = mirrorGateFor(toMove);
-        const gateOccupied = b.getAtIndex(idx1(g.x, g.y)) || b.getAtIndex(idx1(m.x, m.y));
+        const gateOccupied =
+          b.getAtIndex(idx1(g.x, g.y)) ||
+          b.getAtIndex(idx1(m.x, m.y));
+
         if (!isEmptyBoard(b) && gateOccupied) {
           console.log("Planting phase seems over; use moves instead.");
         } else {
@@ -718,14 +721,19 @@ async function main() {
             const g = gateFor(toMove);
             console.log(`Engine → PLANT ${TypeId[t]} at gate (${g.x},${g.y}) (mirrored)`);
             if (toMove === "host") toMove = "guest";
-            console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
+            console.log(`search: ${((t1 - t0) / 1000).toFixed(3)}s`);
             console.log(boardWithSidebar(b));
             continue;
           }
         }
 
         pushHistory(b, toMove);
-        const mv = pickBestMove(b, toMove, DEPTH, TIMEMS ? { maxMs: TIMEMS } : undefined);
+        const mv = pickBestMove(
+          b,
+          toMove,
+          DEPTH,
+          TIMEMS ? { maxMs: TIMEMS } : undefined
+        );
         const t1 = performance.now();
 
         if (!mv) {
@@ -742,16 +750,12 @@ async function main() {
             history.pop(); // rollback
           }
         }
-        console.log(`search: ${((t1 - t0)/1000).toFixed(3)}s`);
+        console.log(`search: ${((t1 - t0) / 1000).toFixed(3)}s`);
         console.log(boardWithSidebar(b));
         continue;
       }
 
       // Arrange:
-      // - If you give multiple waypoints, we use them literally.
-      // - If you give a single destination, we auto-build a Manhattan path.
-      //   We try H-then-V, and if that hits a block, we try V-then-H.
-           // Arrange:
       // - If you give multiple waypoints, we use them literally.
       // - If you give a single destination, we auto-build a Manhattan path.
       //   We try H-then-V, and if that hits a block, we try V-then-H.
@@ -876,7 +880,6 @@ async function main() {
             : `${e.bIdx1}-${e.aIdx1}`;
 
         const beforeSet = new Set(beforeEdges.map(edgeKey));
-
         const newHarmony = afterEdges.some(e => !beforeSet.has(edgeKey(e)));
 
         if (newHarmony && toMove === HUMAN) {
@@ -885,55 +888,6 @@ async function main() {
 
         toMove = other(toMove);
         console.log(boardWithSidebar(b));
-        continue;
-      }
-
-
-        // --- garden color legality: only final landing matters ---
-        const lastIdx = pathIdx[pathIdx.length - 1];
-        const lastXY  = coordsOf(lastIdx - 1);
-        const garden  = getGardenType(lastXY.x, lastXY.y); // "red" | "white" | "neutral"
-
-        const pieceVal = b.getAtIndex(fromIdx);
-        if (!pieceVal) {
-          console.log("Illegal arrange: no piece at source.");
-          continue;
-        }
-        const piece = unpackPiece(pieceVal)!;
-
-        if (isWhiteFlower(piece.type) && garden === "red") {
-          console.log("Illegal arrange: white flowers cannot land in the red garden.");
-          continue;
-        }
-        if (isRedFlower(piece.type) && garden === "white") {
-          console.log("Illegal arrange: red flowers cannot land in the white garden.");
-          continue;
-        }
-
-        // Apply arrange
-        pushHistory(b, toMove);
-        const mv = { kind: "arrange", from: fromIdx, path: pathIdx };
-        const nb = applyAnyMove(b, toMove, mv);
-        copyBoard(b, nb);
-        console.log(boardWithSidebar(b));
-
-        const beforeEdges = listHarmonyEdges(b).filter(e => e.owner === toMove);
-        const afterEdges  = listHarmonyEdges(nb).filter(e => e.owner === toMove);
-
-        const edgeKey = (e: { aIdx1: number; bIdx1: number }) =>
-          e.aIdx1 < e.bIdx1
-            ? `${e.aIdx1}-${e.bIdx1}`
-            : `${e.bIdx1}-${e.aIdx1}`;
-        
-        const beforeSet = new Set(beforeEdges.map(edgeKey));
-        
-        const newHarmony = afterEdges.some(e => !beforeSet.has(edgeKey(e)));
-
-        if (newHarmony && toMove === HUMAN) {
-          await handleHarmonyBonus(b, toMove, ask);
-        }
-
-        toMove = other(toMove);
         continue;
       }
 
