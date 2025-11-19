@@ -751,6 +751,10 @@ async function main() {
       // - If you give multiple waypoints, we use them literally.
       // - If you give a single destination, we auto-build a Manhattan path.
       //   We try H-then-V, and if that hits a block, we try V-then-H.
+           // Arrange:
+      // - If you give multiple waypoints, we use them literally.
+      // - If you give a single destination, we auto-build a Manhattan path.
+      //   We try H-then-V, and if that hits a block, we try V-then-H.
       if (lower.startsWith("arr ")) {
         const m = line.slice(4).split("->");
         if (m.length !== 2) throw new Error("Use: arr x,y -> a,b; c,d; ...");
@@ -762,8 +766,9 @@ async function main() {
         const parts = rhs.split(";").map(p => p.trim()).filter(Boolean);
         if (parts.length === 0) throw new Error("Empty path");
 
-        // Capture harmony edges BEFORE move
-        const beforeEdges = listHarmonyEdges(b);
+        // Capture harmony edges BEFORE move (for the side that is moving)
+        const beforeEdgesAll = listHarmonyEdges(b);
+        const beforeEdges = beforeEdgesAll.filter(e => e.owner === toMove);
 
         let pathIdx: number[] | null = null;
         let lastReason: string | undefined;
@@ -833,6 +838,56 @@ async function main() {
             continue;
           }
         }
+
+        // --- garden color legality: only final landing matters ---
+        const lastIdx = pathIdx[pathIdx.length - 1];
+        const lastXY  = coordsOf(lastIdx - 1);
+        const garden  = getGardenType(lastXY.x, lastXY.y); // "red" | "white" | "neutral"
+
+        const pieceVal = b.getAtIndex(fromIdx);
+        if (!pieceVal) {
+          console.log("Illegal arrange: no piece at source.");
+          continue;
+        }
+        const piece = unpackPiece(pieceVal)!;
+
+        if (isWhiteFlower(piece.type) && garden === "red") {
+          console.log("Illegal arrange: white flowers cannot land in the red garden.");
+          continue;
+        }
+        if (isRedFlower(piece.type) && garden === "white") {
+          console.log("Illegal arrange: red flowers cannot land in the white garden.");
+          continue;
+        }
+
+        // --- actually apply move (with clash validation inside applyAnyMove) ---
+        pushHistory(b, toMove);
+        const mv = { kind: "arrange", from: fromIdx, path: pathIdx };
+        const nb = applyAnyMove(b, toMove, mv);
+        copyBoard(b, nb);
+
+        // --- harmony bonus detection (only for the moving side) ---
+        const afterEdgesAll = listHarmonyEdges(b);
+        const afterEdges = afterEdgesAll.filter(e => e.owner === toMove);
+
+        const edgeKey = (e: { aIdx1: number; bIdx1: number }) =>
+          e.aIdx1 < e.bIdx1
+            ? `${e.aIdx1}-${e.bIdx1}`
+            : `${e.bIdx1}-${e.aIdx1}`;
+
+        const beforeSet = new Set(beforeEdges.map(edgeKey));
+
+        const newHarmony = afterEdges.some(e => !beforeSet.has(edgeKey(e)));
+
+        if (newHarmony && toMove === HUMAN) {
+          await handleHarmonyBonus(b, toMove, ask);
+        }
+
+        toMove = other(toMove);
+        console.log(boardWithSidebar(b));
+        continue;
+      }
+
 
         // --- garden color legality: only final landing matters ---
         const lastIdx = pathIdx[pathIdx.length - 1];
