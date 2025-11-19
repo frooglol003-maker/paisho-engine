@@ -497,57 +497,90 @@ function playerCanPlant(b: Board, side: Side): boolean {
   return hasEmptyGate;
 }
 
-// Bonus: place an accent (Rock / Wheel / Boat / Knotweed)
 async function handleBonusAccent(
   b: Board,
   side: Side,
   ask: (q: string) => Promise<string>
-): Promise<void> {
-  const rem = remainingFromBoard(b);
+) {
+  const ownerEnum = side === "host" ? Owner.Host : Owner.Guest;
+
+  // What accents are still available for this side?
+  const rem  = remainingFromBoard(b);
   const pool = side === "host" ? rem.host : rem.guest;
 
-  const ACCENTS = ["Rock", "Wheel", "Boat", "Knotweed"] as const;
-  const available = ACCENTS.filter(k => (pool[k] ?? 0) > 0);
+  const ACCENTS: { name: string; type: TypeId }[] = [
+    { name: "Rock",     type: TypeId.Rock },
+    { name: "Wheel",    type: TypeId.Wheel },
+    { name: "Boat",     type: TypeId.Boat },
+    { name: "Knotweed", type: TypeId.Knotweed },
+  ];
+
+  const available = ACCENTS.filter(a => (pool[a.name] ?? 0) > 0);
 
   if (available.length === 0) {
-    console.log("No accents remaining to place.");
+    console.log("No accents available; bonus skipped.");
     return;
   }
 
-  console.log("Available accents:", available.join(", "));
+  console.log(
+    "Available accents:",
+    available.map(a => a.name).join(", ")
+  );
 
-  let chosenKey: string | null = null;
-  while (!chosenKey) {
-    const ans = (await ask("Accent type (Rock/Wheel/Boat/Knotweed) > "))
-      .trim().toUpperCase();
-    const match = available.find(k => k.toUpperCase() === ans);
+  // --- choose which accent type ---
+  let chosen: { name: string; type: TypeId } | null = null;
+  while (!chosen) {
+    const ans = (await ask("Accent type (Rock/Wheel/Boat/Knotweed) > ")).trim().toLowerCase();
+    const match = available.find(a => a.name.toLowerCase() === ans);
     if (!match) {
-      console.log("Please choose one of:", available.join(", "));
+      console.log("Please choose one of:", available.map(a => a.name).join(", "));
       continue;
     }
-    chosenKey = match;
+    chosen = match;
   }
 
-  const typ = toTypeId(chosenKey);
-  const ownerEnum = side === "host" ? Owner.Host : Owner.Guest;
+  // --- choose where to place it ---
+  let x: number;
+  let y: number;
+  let idx: number;
 
-  let placed = false;
-  while (!placed) {
+  while (true) {
     const raw = (await ask("Accent position x,y > ")).trim();
     try {
-      const { x, y } = xyFromString(raw);
-      const idx = idx1(x, y);
-      if (b.getAtIndex(idx)) {
-        console.log("That coordinate is not empty.");
-        continue;
-      }
-      b.setAtIndex(idx, packPiece(typ, ownerEnum));
-      console.log("Bonus accent placed.");
-      placed = true;
+      const c = xyFromString(raw);
+      x = c.x;
+      y = c.y;
+      idx = idx1(x, y);
     } catch {
-      console.log("Invalid coordinate; use x,y.");
+      console.log("Please enter coordinates as x,y (for example: 1,-1)");
+      continue;
+    }
+
+    if (b.getAtIndex(idx)) {
+      console.log("Illegal accent: intersection already occupied.");
+      continue;
+    }
+
+    break;
+  }
+
+  // Place the accent tile
+  b.setAtIndex(idx, packPiece(chosen.type, ownerEnum));
+  console.log("Bonus accent placed.");
+
+  // --- SPECIAL: Wheel spins immediately once on placement ---
+  if (chosen.type === TypeId.Wheel) {
+    try {
+      // Re-use the normal wheel move so clash checks etc still apply
+      const mv = { kind: "wheel", center: idx };
+      const nb = applyAnyMove(b, side, mv);
+      copyBoard(b, nb);
+    } catch (e: any) {
+      console.log(`Wheel spin failed: ${e?.message ?? e}`);
     }
   }
+
+  console.log(boardWithSidebar(b));
 }
 
 // Bonus: plant a flower into ANY empty gate
