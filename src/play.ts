@@ -770,6 +770,7 @@ async function main() {
       }
 
       // Force place (debug, but still respect per-side pools)
+// Force place (debug, but still respect per-side pools)
 if (lower.startsWith("place ")) {
   const parts = line.trim().split(/\s+/);
   if (parts.length < 4 || parts.length > 5) {
@@ -781,19 +782,37 @@ if (lower.startsWith("place ")) {
   const { x, y } = xyFromString(parts[3]);
   const advance = (parts[4]?.toLowerCase() === "next");
 
-  // --- NEW: enforce remaining pool for that side ---
-  const rem = remainingFromBoard(b);
+  // --- NEW: target intersection must be empty ---
+  const targetIdx = idx1(x, y);
+  if (b.getAtIndex(targetIdx)) {
+    console.log("Illegal place: intersection already occupied.");
+    continue;
+  }
+  // ---------------------------------------------
+
+  // Enforce remaining pool for that side
+  const rem  = remainingFromBoard(b);
   const pool = owner === Owner.Host ? rem.host : rem.guest;
   const key  = keyForType(type);
 
   if (!key) {
     throw new Error(`Unknown type for pool: ${parts[1]}`);
   }
-
   if ((pool[key] ?? 0) <= 0) {
     console.log(`Illegal place: no ${key} tiles remaining for that side.`);
     continue;
   }
+
+  pushHistory(b, toMove);
+  b.setAtIndex(targetIdx, packPiece(type, owner));
+  console.log(boardWithSidebar(b));
+
+  const ownerSide: Side = owner === Owner.Host ? "host" : "guest";
+  if (advance || ownerSide === toMove) {
+    toMove = other(toMove);
+  }
+  continue;
+}
   // -----------------------------------------------
 
   pushHistory(b, toMove);
