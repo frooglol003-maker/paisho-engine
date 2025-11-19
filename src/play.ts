@@ -6,7 +6,7 @@ import { Board, TypeId, Owner, packPiece, unpackPiece } from "./board";
 import { coordsOf, indexOf } from "./coords";
 import { pickBestMove, applyPlannedArrange } from "./engine";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
-import { validateArrange, detectAnyClash } from "./move";
+import { validateArrange, detectAnyClash, listHarmonyEdges} from "./move";
 import { getGardenType } from "./rules";   // <-- add this line
 
 // ---------- CLI ----------
@@ -834,6 +834,35 @@ if (lower.startsWith("place ")) {
 
   rl.close();
   console.log("Bye!");
+}
+async function handleHarmonyBonus(b: Board, side: Side, ask: (q: string)=>Promise<string>) {
+  console.log(`Harmony bonus!`);
+
+  while (true) {
+    const ans = (await ask("Bonus? (accent / plant / skip) > ")).trim().toLowerCase();
+
+    if (ans === "skip") {
+      console.log("Bonus skipped.");
+      return;
+    }
+
+    if (ans === "accent") {
+      await handleBonusAccent(b, side, ask);
+      return;
+    }
+
+    if (ans === "plant") {
+      const can = playerCanPlant(b, side);
+      if (!can) {
+        console.log("You cannot plant: one of your gates is blocked.");
+        continue;
+      }
+      await handleBonusPlant(b, side, ask);
+      return;
+    }
+
+    console.log("Please choose: accent / plant / skip");
+  }
 }
 
 main().catch(e => { console.error(e); process.exit(1); });
