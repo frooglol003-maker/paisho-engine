@@ -498,7 +498,6 @@ function playerCanPlant(b: Board, side: Side): boolean {
 }
 
 async function handleBonusAccent(
-async function handleBonusAccent(
   b: Board,
   side: Side,
   ask: (q: string) => Promise<string>
