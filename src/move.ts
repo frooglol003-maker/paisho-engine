@@ -17,7 +17,7 @@ import {
 /* Utility to compute orthogonal neighbors (returns 1-based indices). */
 function orthogonalNeighborsIdx(idx1: number): number[] {
   const c = coordsOf(idx1 - 1) as { x: number; y: number } | undefined;
-  if (!c) return []; // invalid index → no neighbors
+  if (!c) return [];
 
   const { x, y } = c;
   const candidates = [
@@ -29,7 +29,7 @@ function orthogonalNeighborsIdx(idx1: number): number[] {
   const out: number[] = [];
   for (const cand of candidates) {
     const i0 = indexOf(cand.x, cand.y); // 0-based
-    if (i0 !== -1) out.push(i0 + 1); // convert back to 1-based
+    if (i0 !== -1) out.push(i0 + 1);     // convert back to 1-based
   }
   return out;
 }
@@ -38,7 +38,7 @@ function orthogonalNeighborsIdx(idx1: number): number[] {
 export function lineOfSightClear(board: Board, aIdx1: number, bIdx1: number): boolean {
   const a = coordsOf(aIdx1 - 1) as any;
   const b = coordsOf(bIdx1 - 1) as any;
-  if (!a || !b) return false; // invalid indices, treat as blocked
+  if (!a || !b) return false;
 
   if (a.x !== b.x && a.y !== b.y) return false;
   const dx = Math.sign(b.x - a.x);
@@ -49,7 +49,7 @@ export function lineOfSightClear(board: Board, aIdx1: number, bIdx1: number): bo
   while (!(cx === b.x && cy === b.y)) {
     const mid0 = indexOf(cx, cy); // 0-based
     if (mid0 === -1) return false; // off board
-    const packed = board.getAtIndex(mid0 + 1); // board is 1-based
+    const packed = board.getAtIndex(mid0 + 1);
     if (packed) return false;
     if (isGateCoord(cx, cy)) return false;
     cx += dx;
@@ -101,10 +101,6 @@ function isWhiteFlower(t: TypeId): boolean {
   return t === TypeId.W3 || t === TypeId.W4 || t === TypeId.W5;
 }
 
-/**
- * Garden-color legality for final landing:
- * Uses canonical getGardenType(x,y) from rules.ts (diamond layout).
- */
 function canStopOnGarden(type: TypeId, x: number, y: number): boolean {
   const g = getGardenType(x, y); // "red" | "white" | "neutral"
 
@@ -132,6 +128,18 @@ function maxArrangeSteps(t: TypeId): number | null {
   }
 }
 
+/**
+ * Validate an arrange path.
+ * - Path is a list of 1-based indices.
+ * - Each step must be 1-square orthogonal (no diagonals, no jumps).
+ * - You CANNOT pass through occupied intersections (intermediate squares).
+ * - FINAL square:
+ *    - may be empty  → normal move
+ *    - or contain an enemy piece → capture allowed
+ *    - but cannot contain your own piece
+ * - You MAY pass through “wrong-color” gardens; only the FINAL
+ *   destination’s garden color must be legal for the tile.
+ */
 export function validateArrange(board: Board, fromIdx: number, path: number[]): ArrangeValidation {
   if (path.length === 0) {
     return { ok: false, reason: "empty path" };
@@ -140,11 +148,10 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
   const startPacked = board.getAtIndex(fromIdx);
   if (!startPacked) return { ok: false, reason: "no tile at start" };
   const startPiece = unpackPiece(startPacked)!;
-  const moverType = startPiece.type;
-  const moverOwner = startPiece.owner;
+  const type = startPiece.type;
 
   // Enforce numbered flower move ranges (3/4/5)
-  const limit = maxArrangeSteps(moverType);
+  const limit = maxArrangeSteps(type);
   if (limit !== null && path.length > limit) {
     return { ok: false, reason: `path too long for that tile (max ${limit})` };
   }
@@ -153,7 +160,7 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
 
   for (let i = 0; i < path.length; i++) {
     const idx = path[i];
-    const { x, y } = coordsOf(idx - 1);
+    const { x, y } = coordsOf(idx - 1); // board index → coords
     const isLast = (i === path.length - 1);
 
     const dx = x - px;
@@ -168,36 +175,25 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
     }
 
     const occupant = board.getAtIndex(idx);
-    if (occupant) {
-      const occ = unpackPiece(occupant)!;
 
-      // You may NOT pass through an occupied intersection.
-      if (!isLast) {
-        return { ok: false, reason: `blocked at intermediate ${idx}` };
-      }
-
-      // On the final square, you may only capture an enemy piece.
-      if (occ.owner === moverOwner) {
-        return { ok: false, reason: "cannot capture your own piece" };
-      }
-      // Capturing enemy piece is allowed – fall through.
+    // Cannot pass THROUGH occupied intersections
+    if (occupant && !isLast) {
+      return { ok: false, reason: `blocked at intermediate ${idx}` };
     }
 
-    // Garden-color legality ONLY on the final landing intersection.
-    if (isLast && !canStopOnGarden(moverType, x, y)) {
-      return { ok: false, reason: "cannot stop on that garden" };
-    }
+    // Final square: allow capture but not friendly fire
+    if (isLast) {
+      if (occupant) {
+        const occ = unpackPiece(occupant)!;
+        if (occ.owner === startPiece.owner) {
+          return { ok: false, reason: "cannot capture your own piece" };
+        }
+        // enemy piece is fine; applyPlannedArrange will overwrite it = capture
+      }
 
-    px = x;
-    py = y;
-  }
-
-  return { ok: true };
-}
-
-    // Garden-color legality ONLY on the final landing intersection.
-    if (isLast && !canStopOnGarden(type, x, y)) {
-      return { ok: false, reason: "cannot stop on that garden" };
+      if (!canStopOnGarden(type, x, y)) {
+        return { ok: false, reason: "cannot stop on that garden" };
+      }
     }
 
     px = x;
@@ -229,7 +225,10 @@ export function buildHarmonyGraph(board: Board): Map<number, number[]> {
       const a = getPieceDescriptor(board, aIdx1) as any;
       const b = getPieceDescriptor(board, bIdx1) as any;
 
-      const aC = coordsOf(aIdx1 - 1), bC = coordsOf(bIdx1 - 1); // coords need 0-based
+      const aC = coordsOf(aIdx1 - 1);
+      const bC = coordsOf(bIdx1 - 1);
+      if (!aC || !bC) continue;
+
       if (aC.x !== bC.x && aC.y !== bC.y) continue;
       if (!lineOfSightClear(board, aIdx1, bIdx1)) continue;
 
@@ -241,8 +240,6 @@ export function buildHarmonyGraph(board: Board): Map<number, number[]> {
       if (isHarmonyActivePair(board, aIdx1, bIdx1, aGarden, aNum, bGarden, bNum)) {
         graph.set(aIdx1, (graph.get(aIdx1) || []).concat(bIdx1));
         graph.set(bIdx1, (graph.get(bIdx1) || []).concat(aIdx1));
-      } else {
-        // Lotus interactions (lotus harmonizes with any basic) — could be added later.
       }
     }
   }
@@ -253,7 +250,7 @@ export function buildHarmonyGraph(board: Board): Map<number, number[]> {
 export type HarmonyEdge = {
   aIdx1: number;
   bIdx1: number;
-  owner: "host" | "guest"; // we tag by side that owns BOTH endpoints
+  owner: "host" | "guest"; // side that owns BOTH endpoints
 };
 
 export function listHarmonyEdges(board: Board): HarmonyEdge[] {
@@ -273,13 +270,11 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
       const bDesc = getPieceDescriptor(board, bIdx1);
       if (bDesc.kind !== "basic" || !bDesc.blooming) continue;
 
-      // Only count harmonies between tiles of the SAME owner (for bonus logic)
-      if (aDesc.owner !== bDesc.owner) continue;
+      if (aDesc.owner !== bDesc.owner) continue; // only same-owner harmonies
 
       const bC = coordsOf(bIdx1 - 1);
       if (!bC) continue;
 
-      // same axis?
       if (aC.x !== bC.x && aC.y !== bC.y) continue;
       if (!lineOfSightClear(board, aIdx1, bIdx1)) continue;
 
@@ -293,7 +288,7 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
       result.push({
         aIdx1,
         bIdx1,
-        owner: aDesc.owner,
+        owner: aDesc.owner as "host" | "guest",
       });
     }
   }
@@ -310,13 +305,7 @@ export function findHarmonyRings(board: Board): number[][] {
   const visited = new Set<string>();
   const maxLen = 20;
 
-  function dfs(
-    start: number,
-    curr: number,
-    parent: number | null,
-    path: number[],
-    seen: Set<number>
-  ) {
+  function dfs(start: number, curr: number, parent: number | null, path: number[], seen: Set<number>) {
     if (path.length > maxLen) return;
     const neighbors = graph.get(curr) || [];
     for (const nb of neighbors) {
@@ -345,7 +334,7 @@ export function findHarmonyRings(board: Board): number[][] {
 }
 
 function cycleEnclosesOrigin(cycle: number[]): boolean {
-  const pts = cycle.map((i1) => coordsOf(i1 - 1));
+  const pts = cycle.map(i1 => coordsOf(i1 - 1));
   let inside = false;
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
     const xi = pts[i].x, yi = pts[i].y;
