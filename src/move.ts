@@ -521,12 +521,12 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
         if (aDesc.kind !== "basic" || bDesc.kind !== "basic") continue;
         if (aDesc.owner !== bDesc.owner) continue;
 
-        ownerSide = (aDesc.owner === Owner.Host ? "host" : "guest");
+        ownerSide = (aDesc.owner === "host" ? "host" : "guest");
       } else {
         // Lotus + basic flower → belongs to the basic flower’s owner
         const basicDesc = aIsLotus ? bDesc : aDesc;
         if (basicDesc.kind !== "basic") continue;
-        ownerSide = (basicDesc.owner === Owner.Host ? "host" : "guest");
+        ownerSide = (basicDesc.owner === "host" ? "host" : "guest");
       }
 
       result.push({
