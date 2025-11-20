@@ -580,6 +580,70 @@ function other(side: Side): Side {
 // listHarmonyEdges return type shim
 type HarmonyEdgeLite = { aIdx1: number; bIdx1: number; owner: Side };
 
+// ----- Endgame helpers -----
+
+type RingOutcome = "none" | "host" | "guest" | "both";
+
+/**
+ * Check for harmony rings that enclose the origin.
+ * A ring only "belongs" to a side if all pieces in that ring
+ * are owned by that side. Mixed-owner rings are ignored.
+ */
+function checkRings(board: Board): RingOutcome {
+  const rings = findHarmonyRings(board);
+  let hostRing = false;
+  let guestRing = false;
+
+  for (const ring of rings) {
+    const owners = new Set<Owner>();
+    for (const idx1 of ring) {
+      const packed = board.getAtIndex(idx1);
+      if (!packed) continue;
+      const piece = unpackPiece(packed)!;
+      owners.add(piece.owner);
+    }
+
+    // Must be monochrome to count
+    if (owners.size !== 1) continue;
+
+    const only = Array.from(owners)[0];
+    if (only === Owner.Host) hostRing = true;
+    else if (only === Owner.Guest) guestRing = true;
+  }
+
+  if (hostRing && guestRing) return "both";
+  if (hostRing) return "host";
+  if (guestRing) return "guest";
+  return "none";
+}
+
+/**
+ * Count harmonies that cross the horizontal midline y=0.
+ * (One endpoint y>0, the other y<0.)
+ */
+function countCrossMidlineHarmonies(board: Board): { host: number; guest: number } {
+  const edges = listHarmonyEdges(board) as HarmonyEdgeLite[];
+  let host = 0;
+  let guest = 0;
+
+  for (const e of edges) {
+    const a = coordsOf(e.aIdx1 - 1);
+    const b = coordsOf(e.bIdx1 - 1);
+    if (!a || !b) continue;
+
+    const crosses =
+      (a.y > 0 && b.y < 0) ||
+      (a.y < 0 && b.y > 0);
+
+    if (!crosses) continue;
+
+    if (e.owner === "host") host++;
+    else guest++;
+  }
+
+  return { host, guest };
+}
+
 // Player can plant only if they have NO tile in ANY gate, and some gate is empty.
 function playerCanPlant(b: Board, side: Side): boolean {
   const myOwner = side === "host" ? Owner.Host : Owner.Guest;
@@ -1015,6 +1079,29 @@ async function main() {
     if (lower === "quit") break;
     if (lower === "help") { help(); continue; }
     if (lower === "print") { console.log(boardWithSidebar(b)); continue; }
+    if (lower === "score") {
+      // 1) First, check ring-based endings
+      const ringOutcome = checkRings(b);
+      if (ringOutcome === "host") {
+        console.log("Host wins by creating a harmony ring.");
+      } else if (ringOutcome === "guest") {
+        console.log("Guest wins by creating a harmony ring.");
+      } else if (ringOutcome === "both") {
+        console.log("Game drawn by creating two harmony rings at once.");
+      } else {
+        // 2) No ring: fall back to cross-midline harmony count
+        const { host, guest } = countCrossMidlineHarmonies(b);
+        if (host > guest) {
+          console.log("Host wins by having more harmonies across the midline.");
+        } else if (guest > host) {
+          console.log("Guest wins by having more harmonies across the midline.");
+        } else {
+          console.log("Game drawn by having the same number of harmonies across the midline.");
+        }
+      }
+      continue;
+    }
+
 
     // Undo
     if (lower === "undo") {
