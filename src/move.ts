@@ -456,6 +456,14 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
       const aIsLotus = aPiece.type === TypeId.Lotus;
       const bIsLotus = bPiece.type === TypeId.Lotus;
 
+      // Lotus cannot harmonize with another Lotus
+      if (aIsLotus && bIsLotus) continue;
+      
+
+      // Lotus cannot harmonize with another Lotus
+      if (aIsLotus && bIsLotus) continue;
+
+
       let edgeOwnerSide: "host" | "guest";
 
       if (!aIsLotus && !bIsLotus) {
