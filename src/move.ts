@@ -132,14 +132,6 @@ function maxArrangeSteps(t: TypeId): number | null {
   }
 }
 
-/**
- * Validate an arrange path.
- * - Path is a list of 1-based indices.
- * - Each step must be 1-square orthogonal (no diagonals, no jumps).
- * - You CANNOT pass through occupied intersections (including the final dest).
- * - You MAY pass through “wrong-color” gardens; only the FINAL
- *   destination’s garden color must be legal for the tile.
- */
 export function validateArrange(board: Board, fromIdx: number, path: number[]): ArrangeValidation {
   if (path.length === 0) {
     return { ok: false, reason: "empty path" };
@@ -148,10 +140,11 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
   const startPacked = board.getAtIndex(fromIdx);
   if (!startPacked) return { ok: false, reason: "no tile at start" };
   const startPiece = unpackPiece(startPacked)!;
-  const type = startPiece.type;
+  const moverType = startPiece.type;
+  const moverOwner = startPiece.owner;
 
   // Enforce numbered flower move ranges (3/4/5)
-  const limit = maxArrangeSteps(type);
+  const limit = maxArrangeSteps(moverType);
   if (limit !== null && path.length > limit) {
     return { ok: false, reason: `path too long for that tile (max ${limit})` };
   }
@@ -160,7 +153,7 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
 
   for (let i = 0; i < path.length; i++) {
     const idx = path[i];
-    const { x, y } = coordsOf(idx - 1); // 1-based board index → 0-based coords index
+    const { x, y } = coordsOf(idx - 1);
     const isLast = (i === path.length - 1);
 
     const dx = x - px;
@@ -174,11 +167,33 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
       return { ok: false, reason: "Arrange must move in single-step increments." };
     }
 
-    // Cannot pass THROUGH any occupied intersection (including final).
     const occupant = board.getAtIndex(idx);
     if (occupant) {
-      return { ok: false, reason: `blocked at intermediate ${idx}` };
+      const occ = unpackPiece(occupant)!;
+
+      // You may NOT pass through an occupied intersection.
+      if (!isLast) {
+        return { ok: false, reason: `blocked at intermediate ${idx}` };
+      }
+
+      // On the final square, you may only capture an enemy piece.
+      if (occ.owner === moverOwner) {
+        return { ok: false, reason: "cannot capture your own piece" };
+      }
+      // Capturing enemy piece is allowed – fall through.
     }
+
+    // Garden-color legality ONLY on the final landing intersection.
+    if (isLast && !canStopOnGarden(moverType, x, y)) {
+      return { ok: false, reason: "cannot stop on that garden" };
+    }
+
+    px = x;
+    py = y;
+  }
+
+  return { ok: true };
+}
 
     // Garden-color legality ONLY on the final landing intersection.
     if (isLast && !canStopOnGarden(type, x, y)) {
