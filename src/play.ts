@@ -575,6 +575,27 @@ function other(side: Side): Side {
   return side === "host" ? "guest" : "host";
 }
 
+// ---------- Endgame ring check ----------
+function checkForGameEnd(board: Board): void {
+  const rings = getRingOwners(board);
+
+  if (!rings.host && !rings.guest) return;
+
+  if (rings.host && rings.guest) {
+    console.log(
+      "Game over: draw – both players created a harmony ring at the same time!"
+    );
+    return;
+  }
+
+  if (rings.host) {
+    console.log("Game over: HOST wins by creating a harmony ring!");
+  } else {
+    console.log("Game over: GUEST wins by creating a harmony ring!");
+  }
+}
+
+
 // ---------- Harmony bonus helpers ----------
 
 // listHarmonyEdges return type shim
@@ -1119,24 +1140,6 @@ async function main() {
       }
       continue;
     }
-
-    function checkForGameEnd(board: Board): void {
-  const rings = getRingOwners(board);
-
-  if (!rings.host && !rings.guest) return; // no ring yet
-
-  if (rings.host && rings.guest) {
-    console.log("Game over: draw – both players created a harmony ring around the center!");
-    return;
-  }
-
-  if (rings.host) {
-    console.log("Game over: HOST wins by creating a harmony ring around the center!");
-  } else {
-    console.log("Game over: GUEST wins by creating a harmony ring around the center!");
-  }
-}
-
 
     try {
       // Opening: plant by hand
