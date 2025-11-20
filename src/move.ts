@@ -415,7 +415,7 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
     if (!aPack) continue;
 
     const aPiece = unpackPiece(aPack)!;
-    // Orchids never harmonize with anything
+    // Orchids never harmonize
     if (aPiece.type === TypeId.Orchid) continue;
 
     const aDesc = getPieceDescriptor(board, aIdx1);
@@ -430,25 +430,22 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
       if (!bPack) continue;
 
       const bPiece = unpackPiece(bPack)!;
-      // Orchids never harmonize with anything
+      // Orchids never harmonize
       if (bPiece.type === TypeId.Orchid) continue;
 
       const bDesc = getPieceDescriptor(board, bIdx1);
       if (!bDesc.blooming) continue;
 
-      // Bonus logic: only count harmonies between tiles of the SAME owner
-      if (aDesc.owner !== bDesc.owner) continue;
-
       const bC = coordsOf(bIdx1 - 1);
       if (!bC) continue;
 
-      // same axis?
+      // Must share an axis
       if (aC.x !== bC.x && aC.y !== bC.y) continue;
       if (!lineOfSightClear(board, aIdx1, bIdx1)) continue;
 
       const aGarden = aDesc.garden as ("R" | "W");
       const bGarden = bDesc.garden as ("R" | "W");
-      // Allow undefined numbers so Lotus can participate
+      // Allow undefined to let Lotus harmonize with anything
       const aNum = aDesc.number as (3 | 4 | 5 | undefined);
       const bNum = bDesc.number as (3 | 4 | 5 | undefined);
 
@@ -456,16 +453,32 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
         continue;
       }
 
+      const aIsLotus = aPiece.type === TypeId.Lotus;
+      const bIsLotus = bPiece.type === TypeId.Lotus;
+
+      let edgeOwnerSide: "host" | "guest";
+
+      if (!aIsLotus && !bIsLotus) {
+        // Normal basic–basic harmony: only if same owner
+        if (aDesc.owner !== bDesc.owner) continue;
+        edgeOwnerSide = (aDesc.owner === Owner.Host ? "host" : "guest");
+      } else {
+        // At least one Lotus: harmony belongs to the BASIC flower's owner
+        const basicOwnerEnum = aIsLotus ? bDesc.owner : aDesc.owner;
+        edgeOwnerSide = (basicOwnerEnum === Owner.Host ? "host" : "guest");
+      }
+
       result.push({
         aIdx1,
         bIdx1,
-        owner: aDesc.owner,
+        owner: edgeOwnerSide,
       });
     }
   }
 
   return result;
 }
+
 
 /* Basic cycle detection + polygon test for center inclusion (0,0).
    We build simple cycles via DFS, then ray-cast to check if polygon encloses origin. */
