@@ -262,6 +262,13 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
 
   const startPacked = board.getAtIndex(fromIdx);
   if (!startPacked) return { ok: false, reason: "no tile at start" };
+
+   // Orchid freeze: if this piece is frozen, it cannot move at all.
+  // (We let rules.ts decide what counts as "trapped".)
+  if (isTrappedByOrchid(board, fromIdx)) {
+    return { ok: false, reason: "piece is frozen by an Orchid" };
+  }
+  
   const startPiece = unpackPiece(startPacked)!;
   const type = startPiece.type;
 
@@ -411,7 +418,7 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
     if (aPiece.type === TypeId.Orchid) continue; // orchids never harmonize
 
     const aDesc = getPieceDescriptor(board, aIdx1);
-    if (aDesc.kind !== "basic" || !aDesc.blooming) continue;
+    if (!aDesc.blooming) continue;
 
     const aC = coordsOf(aIdx1 - 1);
     if (!aC) continue;
@@ -425,7 +432,7 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
       if (bPiece.type === TypeId.Orchid) continue; // orchids never harmonize
 
       const bDesc = getPieceDescriptor(board, bIdx1);
-      if (bDesc.kind !== "basic" || !bDesc.blooming) continue;
+      if (!bDesc.blooming) continue;
 
       // Only count harmonies between tiles of the SAME owner (for bonus logic)
       if (aDesc.owner !== bDesc.owner) continue;
