@@ -332,14 +332,19 @@ export function buildHarmonyGraph(board: Board): Map<number, number[]> {
   for (let i = 0; i < pts.length; i++) {
     const idx1 = i + 1;
     const desc = getPieceDescriptor(board, idx1);
-    if (desc.kind !== "basic" || !desc.blooming) continue;
+
+    // Must be blooming to harmonize:
+    if (!desc.blooming) continue;
 
     const packed = board.getAtIndex(idx1);
     if (!packed) continue;
     const piece = unpackPiece(packed)!;
 
-    // Orchids NEVER harmonize.
+    // Orchids NEVER harmonize with anything.
     if (piece.type === TypeId.Orchid) continue;
+
+    // Lotus *is allowed* to harmonize.
+    // Flowers are allowed. Wheel/Rock/Boat/Knotweed are NOT blooming, so already filtered out.
 
     nodeIdxs.push(idx1);
   }
@@ -355,25 +360,34 @@ export function buildHarmonyGraph(board: Board): Map<number, number[]> {
       const bC = coordsOf(bIdx1 - 1);
       if (!aC || !bC) continue;
 
-      // same axis?
+      // Must share an axis
       if (aC.x !== bC.x && aC.y !== bC.y) continue;
+
+      // Must not have blockers
       if (!lineOfSightClear(board, aIdx1, bIdx1)) continue;
 
+      // Get full descriptors
       const aDesc = getPieceDescriptor(board, aIdx1);
       const bDesc = getPieceDescriptor(board, bIdx1);
-      if (aDesc.kind !== "basic" || bDesc.kind !== "basic") continue;
 
+      // Orchids already filtered above, but double-protect:
+      if (aDesc.type === TypeId.Orchid || bDesc.type === TypeId.Orchid) continue;
+
+      // Lotus is allowed — so we do NOT enforce "basic" anymore.
+      // Let rules.ts decide harmony rules:
       const aGarden = aDesc.garden as ("R" | "W");
       const bGarden = bDesc.garden as ("R" | "W");
-      const aNum = aDesc.number as (3 | 4 | 5);
-      const bNum = bDesc.number as (3 | 4 | 5);
+      const aNum = aDesc.number as (3 | 4 | 5 | undefined);
+      const bNum = bDesc.number as (3 | 4 | 5 | undefined);
 
+      // Harmony rules (Lotus always returns true inside isHarmonyActivePair)
       if (isHarmonyActivePair(board, aIdx1, bIdx1, aGarden, aNum, bGarden, bNum)) {
         graph.set(aIdx1, (graph.get(aIdx1) || []).concat(bIdx1));
         graph.set(bIdx1, (graph.get(bIdx1) || []).concat(aIdx1));
       }
     }
   }
+
   return graph;
 }
 
