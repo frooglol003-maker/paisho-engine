@@ -501,6 +501,53 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
   return result;
 }
 
+// Who (if anyone) currently owns a harmony ring around (0,0)?
+export type RingOwners = { host: boolean; guest: boolean };
+
+/**
+ * A "ring" is any harmony cycle from findHarmonyRings whose edges are
+ * all owned by the same side (host or guest). If both sides have at least
+ * one such ring at the same time, that's a double-ring draw.
+ */
+export function getRingOwners(board: Board): RingOwners {
+  const edges = listHarmonyEdges(board);
+  // Map undirected edge key "min-max" -> owner ("host" | "guest")
+  const edgeOwner = new Map<string, "host" | "guest">();
+  for (const e of edges) {
+    const a = Math.min(e.aIdx1, e.bIdx1);
+    const b = Math.max(e.aIdx1, e.bIdx1);
+    const key = `${a}-${b}`;
+    edgeOwner.set(key, e.owner);
+  }
+
+  const rings = findHarmonyRings(board);
+  let host = false;
+  let guest = false;
+
+  for (const cycle of rings) {
+    if (cycle.length < 3) continue;
+
+    const owners = new Set<"host" | "guest">();
+
+    for (let i = 0; i < cycle.length; i++) {
+      const a = cycle[i];
+      const b = cycle[(i + 1) % cycle.length];
+      const key = `${Math.min(a, b)}-${Math.max(a, b)}`;
+      const owner = edgeOwner.get(key);
+      if (owner) owners.add(owner);
+    }
+
+    // Ring only "belongs" if all its edges belong to the same side
+    if (owners.size === 1) {
+      const only = [...owners][0];
+      if (only === "host") host = true;
+      else guest = true;
+    }
+  }
+
+  return { host, guest };
+}
+
 /* Basic cycle detection + polygon test for center inclusion (0,0).
    We build simple cycles via DFS, then ray-cast to check if polygon encloses origin. */
 export function findHarmonyRings(board: Board): number[][] {
