@@ -981,6 +981,13 @@ async function main() {
       // Opening: plant by hand
       if (lower.startsWith("plant ")) {
         const typ = toTypeId(line.slice(6).trim());
+
+        // Lotus and Orchid may ONLY be planted as harmony bonuses.
+        if (typ === TypeId.Lotus || typ === TypeId.Orchid) {
+          console.log("Lotus and Orchid may only be planted as a harmony bonus.");
+          continue;
+        }
+
         const g = gateFor(toMove), m = mirrorGateFor(toMove);
         const gateOccupied =
           b.getAtIndex(idx1(g.x, g.y)) ||
