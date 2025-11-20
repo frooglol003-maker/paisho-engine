@@ -837,13 +837,21 @@ async function handleBonusPlant(
 
   let chosenType: TypeId | null = null;
   while (!chosenType) {
-    const ans = (await ask("Plant which type? > ")).trim().toUpperCase();
-    if (!available.includes(ans as any)) {
+    const raw = (await ask("Plant which type? > ")).trim();
+    if (!raw) continue;
+
+    const upper = raw.toUpperCase();
+
+    // Find a matching key case-insensitively
+    const match = available.find(k => k.toUpperCase() === upper);
+    if (!match) {
       console.log("Please choose one of:", available.join(", "));
       continue;
     }
+
     try {
-      chosenType = toTypeId(ans);
+      // Convert the canonical name (e.g. "Orchid") to TypeId
+      chosenType = toTypeId(match);
     } catch {
       console.log("Unknown type, try again.");
     }
@@ -897,6 +905,7 @@ async function handleBonusPlant(
   b.setAtIndex(idx, packPiece(chosenType!, myOwner));
   console.log("Bonus plant applied.");
 }
+
 
 // Decide what to do with a harmony bonus
 async function handleHarmonyBonus(
