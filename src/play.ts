@@ -574,7 +574,7 @@ async function handleBonusAccent(
 
   // --- choose accent type ---
   const ACCENT_CHOICES = ["Rock", "Wheel", "Boat", "Knotweed"] as const;
-  let chosenType: typeof ACCENT_CHOICES[number] | null = null;
+  let chosenType: (typeof ACCENT_CHOICES)[number] | null = null;
 
   console.log("Accent types:", ACCENT_CHOICES.join(", "));
 
@@ -583,9 +583,7 @@ async function handleBonusAccent(
       .trim()
       .toLowerCase();
 
-    const match = ACCENT_CHOICES.find(
-      t => t.toLowerCase() === ans
-    );
+    const match = ACCENT_CHOICES.find(t => t.toLowerCase() === ans);
     if (!match) {
       console.log("Please choose one of:", ACCENT_CHOICES.join(", "));
       continue;
@@ -593,7 +591,7 @@ async function handleBonusAccent(
     chosenType = match;
   }
 
-  // ----- NON-Boat accents: must place on EMPTY intersection -----
+  // ====== NON-Boat accents (Rock / Wheel / Knotweed) ======
   if (chosenType !== "Boat") {
     while (true) {
       const raw = (await ask("Accent position x,y > ")).trim();
@@ -620,11 +618,24 @@ async function handleBonusAccent(
         continue;
       }
 
-      // trial placement
+      // Trial board
       const trial = b.clone();
       const tId = toTypeId(chosenType);
       trial.setAtIndex(idx1, packPiece(tId, myOwner));
 
+      // Special case: Wheel should immediately rotate the ring.
+      if (chosenType === "Wheel") {
+        try {
+          applyWheel(trial, side, idx1);
+        } catch (e: any) {
+          console.log(
+            `Illegal wheel: ${e?.message ?? "cannot rotate from that position."}`
+          );
+          continue;
+        }
+      }
+
+      // Global legality checks AFTER accent (and wheel rotation if any)
       if (detectAnyClash(trial)) {
         console.log("Illegal accent: creates a clash.");
         continue;
@@ -634,15 +645,19 @@ async function handleBonusAccent(
         continue;
       }
 
-      // commit
+      // Commit
       copyBoard(b, trial);
-      console.log("Accent placed.");
+      if (chosenType === "Wheel") {
+        console.log("Wheel placed and neighbors rotated.");
+      } else {
+        console.log("Accent placed.");
+      }
       console.log(boardWithSidebar(b));
       return;
     }
   }
 
-  // ----- Boat accent: can target a flower OR an accent, not empty -----
+  // ====== Boat accent (can hit flower OR accent) ======
   while (true) {
     const raw = (await ask("Boat target x,y (enemy flower or accent) > ")).trim();
     if (!raw) continue;
@@ -696,7 +711,7 @@ async function handleBonusAccent(
     // --- Case 1: Boat on ACCENT → remove that accent, boat consumed ---
     if (isAccent) {
       const trial = b.clone();
-      trial.setAtIndex(idx1, 0); // remove accent, boat is "used" and not placed
+      trial.setAtIndex(idx1, 0); // remove accent; boat is "used" and not left anywhere
 
       if (detectAnyClash(trial) || boardViolatesGarden(trial)) {
         console.log("Illegal accent: result would be a clash or wrong garden.");
@@ -764,16 +779,13 @@ async function handleBonusAccent(
         continue;
       }
 
-      // Try the move on a trial board:
       const trial = b.clone();
 
-      // 1) Remove flower from source
+      // Remove flower from source
       trial.setAtIndex(idx1, 0);
-
-      // 2) Place flower at destination
+      // Place flower at destination
       trial.setAtIndex(destIdx1, packed);
-
-      // 3) Leave inert boat on original flower square
+      // Leave inert boat on original flower square
       trial.setAtIndex(idx1, packPiece(TypeId.Boat, myOwner));
 
       if (detectAnyClash(trial)) {
@@ -781,11 +793,12 @@ async function handleBonusAccent(
         continue;
       }
       if (boardViolatesGarden(trial)) {
-        console.log("Illegal accent: leaves a flower in the wrong garden. Try another destination.");
+        console.log(
+          "Illegal accent: leaves a flower in the wrong garden. Try another destination."
+        );
         continue;
       }
 
-      // Commit move
       copyBoard(b, trial);
       console.log("Boat moved the flower.");
       console.log(boardWithSidebar(b));
