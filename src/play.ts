@@ -222,7 +222,8 @@ function enginePickOpeningType(board: Board, side: Side): TypeId | null {
   const rem = remainingFromBoard(board);
   const pool = side === "host" ? rem.host : rem.guest;
 
-  const order = ["R3","W3","R4","W4","R5","W5","Lotus","Orchid"] as const;
+  // Only basic numbered flowers for openings
+  const order = ["R3","W3","R4","W4","R5","W5"] as const;
   for (const k of order) {
     if ((pool[k] ?? 0) > 0) return toTypeId(k);
   }
