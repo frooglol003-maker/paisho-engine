@@ -426,20 +426,119 @@ export function buildHarmonyGraph(board: Board): Map<number, number[]> {
   return graph;
 }
 
-/* Simple edge listing, useful for detecting NEW harmonies after a move. */
+/* -------------------------------------------------------------------------- */
+/*  Harmony graph & rings                                                     */
+/* -------------------------------------------------------------------------- */
+
 export type HarmonyEdge = {
   aIdx1: number;
   bIdx1: number;
-  owner: "host" | "guest"; // we tag by side that owns the harmony
+  owner: "host" | "guest"; // side that “owns” this harmony (for bonus & coloring)
 };
 
-/* Simple edge listing, useful for detecting NEW harmonies after a move. */
-export type HarmonyEdge = {
-  aIdx1: number;
-  bIdx1: number;
-  owner: "host" | "guest"; // side that “owns” this harmony
-};
+/* Build harmony graph.
+   Nodes: blooming tiles that can harmonize
+          – all basic flowers
+          – Lotus (always allowed)
+          – NEVER Orchid.
+   Edges: share axis, lineOfSightClear, and either
+          – isHarmonyActivePair(...) for normal flower–flower, or
+          – “Lotus override” when exactly one endpoint is Lotus.
+*/
+export function buildHarmonyGraph(board: Board): Map<number, number[]> {
+  const pts = generateValidPoints();
+  const nodeIdxs: number[] = [];
 
+  // --- which indices can ever be harmony endpoints? ---
+  for (let i = 0; i < pts.length; i++) {
+    const idx1 = i + 1;
+    const packed = board.getAtIndex(idx1);
+    if (!packed) continue;
+
+    const piece = unpackPiece(packed)!;
+
+    // Orchids NEVER harmonize
+    if (piece.type === TypeId.Orchid) continue;
+
+    const desc = getPieceDescriptor(board, idx1);
+
+    // Basic flowers: must be blooming
+    if (desc.kind === "basic" && desc.blooming) {
+      nodeIdxs.push(idx1);
+      continue;
+    }
+
+    // Lotus: always allowed as a harmony node
+    if (piece.type === TypeId.Lotus) {
+      nodeIdxs.push(idx1);
+    }
+  }
+
+  const graph = new Map<number, number[]>();
+
+  for (let i = 0; i < nodeIdxs.length; i++) {
+    for (let j = i + 1; j < nodeIdxs.length; j++) {
+      const aIdx1 = nodeIdxs[i];
+      const bIdx1 = nodeIdxs[j];
+
+      const aC = coordsOf(aIdx1 - 1);
+      const bC = coordsOf(bIdx1 - 1);
+      if (!aC || !bC) continue;
+
+      // Must share an axis
+      if (aC.x !== bC.x && aC.y !== bC.y) continue;
+
+      // Must not have blockers between them
+      if (!lineOfSightClear(board, aIdx1, bIdx1)) continue;
+
+      const aPack = board.getAtIndex(aIdx1)!;
+      const bPack = board.getAtIndex(bIdx1)!;
+      const aPiece = unpackPiece(aPack)!;
+      const bPiece = unpackPiece(bPack)!;
+
+      // Orchids never harmonize (double-check)
+      if (aPiece.type === TypeId.Orchid || bPiece.type === TypeId.Orchid) continue;
+
+      const aIsLotus = aPiece.type === TypeId.Lotus;
+      const bIsLotus = bPiece.type === TypeId.Lotus;
+
+      // Lotus cannot harmonize with another Lotus
+      if (aIsLotus && bIsLotus) continue;
+
+      const aDesc = getPieceDescriptor(board, aIdx1);
+      const bDesc = getPieceDescriptor(board, bIdx1);
+
+      // For basics we use their real garden/number; for non-basics (Lotus) we
+      // supply harmless dummy values just to satisfy the types.
+      const aGarden: "R" | "W" =
+        aDesc.kind === "basic" ? (aDesc.garden as "R" | "W") : "R";
+      const bGarden: "R" | "W" =
+        bDesc.kind === "basic" ? (bDesc.garden as "R" | "W") : "R";
+      const aNum: 3 | 4 | 5 =
+        aDesc.kind === "basic" ? (aDesc.number as 3 | 4 | 5) : 3;
+      const bNum: 3 | 4 | 5 =
+        bDesc.kind === "basic" ? (bDesc.number as 3 | 4 | 5) : 3;
+
+      // Normal harmony rule
+      let active = isHarmonyActivePair(board, aIdx1, bIdx1, aGarden, aNum, bGarden, bNum);
+
+      // Lotus override: if exactly one endpoint is Lotus, treat as harmonic
+      if (!active && (aIsLotus !== bIsLotus)) {
+        active = true;
+      }
+
+      if (!active) continue;
+
+      graph.set(aIdx1, (graph.get(aIdx1) || []).concat(bIdx1));
+      graph.set(bIdx1, (graph.get(bIdx1) || []).concat(aIdx1));
+    }
+  }
+
+  return graph;
+}
+
+/* Simple edge listing, useful for detecting NEW harmonies after a move
+   and for UI coloring (host vs guest). */
 export function listHarmonyEdges(board: Board): HarmonyEdge[] {
   const pts = generateValidPoints();
   const result: HarmonyEdge[] = [];
@@ -450,11 +549,10 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
     if (!aPack) continue;
 
     const aPiece = unpackPiece(aPack)!;
-    // Orchids never harmonize
-    if (aPiece.type === TypeId.Orchid) continue;
+    if (aPiece.type === TypeId.Orchid) continue; // orchids never harmonize
 
     const aDesc = getPieceDescriptor(board, aIdx1);
-    const aC    = coordsOf(aIdx1 - 1);
+    const aC = coordsOf(aIdx1 - 1);
     if (!aC) continue;
 
     for (let j = i + 1; j < pts.length; j++) {
@@ -466,12 +564,12 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
       if (bPiece.type === TypeId.Orchid) continue;
 
       const bDesc = getPieceDescriptor(board, bIdx1);
-      const bC    = coordsOf(bIdx1 - 1);
+      const bC = coordsOf(bIdx1 - 1);
       if (!bC) continue;
 
       // Must share an axis
       if (aC.x !== bC.x && aC.y !== bC.y) continue;
-      // Nothing between them
+      // Must have clear LOS
       if (!lineOfSightClear(board, aIdx1, bIdx1)) continue;
 
       const aIsLotus = (aPiece.type === TypeId.Lotus);
@@ -480,38 +578,40 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
       // Lotus–Lotus is NOT a harmony
       if (aIsLotus && bIsLotus) continue;
 
-      const aGarden =
-        aDesc.kind === "basic" ? (aDesc.garden as "R" | "W") : undefined;
-      const bGarden =
-        bDesc.kind === "basic" ? (bDesc.garden as "R" | "W") : undefined;
-      const aNum =
-        aDesc.kind === "basic" ? (aDesc.number as 3 | 4 | 5 | undefined) : undefined;
-      const bNum =
-        bDesc.kind === "basic" ? (bDesc.number as 3 | 4 | 5 | undefined) : undefined;
+      const aGarden: "R" | "W" =
+        aDesc.kind === "basic" ? (aDesc.garden as "R" | "W") : "R";
+      const bGarden: "R" | "W" =
+        bDesc.kind === "basic" ? (bDesc.garden as "R" | "W") : "R";
+      const aNum: 3 | 4 | 5 =
+        aDesc.kind === "basic" ? (aDesc.number as 3 | 4 | 5) : 3;
+      const bNum: 3 | 4 | 5 =
+        bDesc.kind === "basic" ? (bDesc.number as 3 | 4 | 5) : 3;
 
-      // Normal harmony test
+      // Normal harmony check
       let active = isHarmonyActivePair(board, aIdx1, bIdx1, aGarden, aNum, bGarden, bNum);
 
-      // Lotus override: if exactly one endpoint is Lotus, force active
+      // Lotus override
       if (!active && (aIsLotus !== bIsLotus)) {
         active = true;
       }
-
       if (!active) continue;
 
-      // Decide which side “owns” this harmony for bonuses / coloring:
+      // Decide which side “owns” this harmony.
       let edgeOwnerSide: "host" | "guest";
 
       if (!aIsLotus && !bIsLotus) {
-        // Standard basic–basic harmony: both must be same owner
+        // Standard basic–basic harmony: both must be basic & same owner
         if (aDesc.kind !== "basic" || bDesc.kind !== "basic") continue;
         if (aDesc.owner !== bDesc.owner) continue;
+
         edgeOwnerSide = (aDesc.owner === Owner.Host ? "host" : "guest");
       } else {
         // At least one Lotus – harmony belongs to the BASIC flower’s owner
         const basicDesc = aIsLotus ? bDesc : aDesc;
-        if (basicDesc.kind !== "basic") continue; // safety
-        edgeOwnerSide = (basicDesc.owner === Owner.Host ? "host" : "guest");
+        if (basicDesc.kind !== "basic") continue;
+        const basicOwnerEnum: Owner = basicDesc.owner;
+
+        edgeOwnerSide = (basicOwnerEnum === Owner.Host ? "host" : "guest");
       }
 
       result.push({
