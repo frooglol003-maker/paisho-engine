@@ -122,8 +122,8 @@ const BG_WHITE   = BG(230); // light wood
 const BG_GATE    = BG(34);  // green
 
 // Bright cyan for harmony “wires” between pieces
-const FG_HARMONY = FG(51);
-
+const FG_HARM_HOST  = FG(45);   // bright cyan for host harmonies
+const FG_HARM_GUEST = FG(201);  // bright magenta for guest harmonies
 /**
  * Compute all board indices (1-based) that lie on an active harmony segment
  * between two tiles of the same side. We mark the EMPTY intersections in
@@ -358,6 +358,41 @@ function boardWithSidebar(board: Board): string {
     base += widths[r];
   }
 
+    // --- Harmony overlay: build a map of indices that lie on harmony lines ---
+  const harmonyMarks = new Map<number, Side>(); // idx1 -> "host" | "guest"
+  const harmonyEdges = (listHarmonyEdges(board) as HarmonyEdgeLite[]);
+
+  for (const e of harmonyEdges) {
+    const ownerSide = e.owner; // "host" | "guest"
+    const aC = coordsOf(e.aIdx1 - 1);
+    const bC = coordsOf(e.bIdx1 - 1);
+    if (!aC || !bC) continue;
+
+    if (aC.x === bC.x) {
+      // vertical segment
+      const x = aC.x;
+      const step = aC.y < bC.y ? 1 : -1;
+      for (let y = aC.y; ; y += step) {
+        const i0 = indexOf(x, y);
+        if (i0 === -1) break;
+        const idx1Val = i0 + 1;
+        harmonyMarks.set(idx1Val, ownerSide);
+        if (y === bC.y) break;
+      }
+    } else if (aC.y === bC.y) {
+      // horizontal segment
+      const y = aC.y;
+      const step = aC.x < bC.x ? 1 : -1;
+      for (let x = aC.x; ; x += step) {
+        const i0 = indexOf(x, y);
+        if (i0 === -1) break;
+        const idx1Val = i0 + 1;
+        harmonyMarks.set(idx1Val, ownerSide);
+        if (x === bC.x) break;
+      }
+    }
+  }
+
   // Side panel data
   const onBoard = countsOnBoard(board);
   const hostOn = countsToLines("HOST on board", onBoard.host, FG_HOST);
@@ -401,11 +436,19 @@ function boardWithSidebar(board: Board): string {
       }
       const { x, y } = xy;
       const bg = cellBg(x, y);
-           if (!p) {
-        const onHarmony = harmonySegs.has(idx);
-        const dotColor = onHarmony ? FG_HARMONY : GRID_DOT;
-        cells.push(`${bg}${dotColor}· ${RESET}`);
+                 const mark = harmonyMarks.get(idx);
+
+      if (!p) {
+        // Empty intersection: draw a colored harmony dot if it's on a harmony line
+        if (mark) {
+          const fg = mark === "host" ? FG_HARM_HOST : FG_HARM_GUEST;
+          cells.push(`${bg}${fg}· ${RESET}`);
+        } else {
+          cells.push(`${bg}${GRID_DOT}· ${RESET}`);
+        }
       } else {
+        // Tile present: keep normal piece coloring for ownership,
+        // but we could later add special styling if we want.
         const d = unpackPiece(p)!;
         const fg = d.owner === Owner.Host ? FG_HOST : FG_GUEST;
         const sym = symOf(d.type);
