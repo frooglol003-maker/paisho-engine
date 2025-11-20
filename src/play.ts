@@ -6,7 +6,7 @@ import { Board, TypeId, Owner, packPiece, unpackPiece } from "./board";
 import { coordsOf, indexOf } from "./coords";
 import { pickBestMove, applyPlannedArrange } from "./engine";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
-import { validateArrange, detectAnyClash, listHarmonyEdges, findHarmonyRings} from "./move";
+import { validateArrange, detectAnyClash, listHarmonyEdges, findHarmonyRings, getRingOwners} from "./move";
 import { getGardenType } from "./rules";
 
 // ---------- CLI ----------
@@ -759,6 +759,7 @@ async function handleBonusAccent(
         console.log("Wheel placed and neighbors rotated.");
       } else {
         console.log("Accent placed.");
+        checkForGameEnd(b);
       }
       console.log(boardWithSidebar(b));
       return;
@@ -829,6 +830,7 @@ async function handleBonusAccent(
       copyBoard(b, trial);
       console.log("Boat removed the accent.");
       console.log(boardWithSidebar(b));
+      checkForGameEnd(b);
       return;
     }
 
@@ -910,6 +912,7 @@ async function handleBonusAccent(
       copyBoard(b, trial);
       console.log("Boat moved the flower.");
       console.log(boardWithSidebar(b));
+      checkForGameEnd(b);
       return;
     }
   }
@@ -1115,6 +1118,24 @@ async function main() {
       }
       continue;
     }
+
+    function checkForGameEnd(board: Board): void {
+  const rings = getRingOwners(board);
+
+  if (!rings.host && !rings.guest) return; // no ring yet
+
+  if (rings.host && rings.guest) {
+    console.log("Game over: draw – both players created a harmony ring around the center!");
+    return;
+  }
+
+  if (rings.host) {
+    console.log("Game over: HOST wins by creating a harmony ring around the center!");
+  } else {
+    console.log("Game over: GUEST wins by creating a harmony ring around the center!");
+  }
+}
+
 
     try {
       // Opening: plant by hand
