@@ -483,11 +483,11 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
       if (!aIsLotus && !bIsLotus) {
         // Normal basic–basic harmony: only if same owner
         if (aDesc.owner !== bDesc.owner) continue;
-        edgeOwnerSide = (aDesc.owner === Owner.Host ? "host" : "guest");
+        edgeOwnerSide = (aDesc.owner === "host" ? "host" : "guest");
       } else {
         // At least one Lotus: harmony is owned by the basic flower
         const basicOwnerEnum = aIsLotus ? bDesc.owner : aDesc.owner;
-        edgeOwnerSide = (basicOwnerEnum === Owner.Host ? "host" : "guest");
+        edgeOwnerSide = (basicOwnerEnum === "host" ? "host" : "guest");
       }
 
       result.push({
