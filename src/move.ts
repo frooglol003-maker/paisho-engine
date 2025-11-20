@@ -21,7 +21,7 @@ import {
 /* Utility to compute orthogonal neighbors (returns 1-based indices). */
 function orthogonalNeighborsIdx(idx1: number): number[] {
   const c = coordsOf(idx1 - 1) as { x: number; y: number } | undefined;
-  if (!c) return []; // invalid index → no neighbors
+  if (!c) return [];
 
   const { x, y } = c;
   const candidates = [
@@ -33,7 +33,7 @@ function orthogonalNeighborsIdx(idx1: number): number[] {
   const out: number[] = [];
   for (const cand of candidates) {
     const i0 = indexOf(cand.x, cand.y); // 0-based
-    if (i0 !== -1) out.push(i0 + 1); // convert back to 1-based
+    if (i0 !== -1) out.push(i0 + 1);    // back to 1-based
   }
   return out;
 }
@@ -132,8 +132,8 @@ function maxArrangeSteps(t: TypeId): number | null {
     case TypeId.W4: return 4;
     case TypeId.R5:
     case TypeId.W5: return 5;
-    case TypeId.Lotus:   return 2; // Lotus moves up to 2
-    case TypeId.Orchid:  return 6; // Orchid moves up to 6
+    case TypeId.Lotus:  return 2; // Lotus moves up to 2
+    case TypeId.Orchid: return 6; // Orchid moves up to 6
     default:
       // Rock, Wheel, Boat, Knotweed:
       // if they arrange at all, treat them as "no intrinsic limit"
@@ -171,7 +171,7 @@ function hasLotusOutOfGate(board: Board, owner: Owner): boolean {
  *   - can be captured by any enemy piece
  * Non-wild orchid:
  *   - cannot capture or be captured by "normal" pieces
- *   - BUT (because "anything can capture a wild orchid") it can still capture an enemy wild orchid.
+ *   - BUT it can still capture an enemy wild orchid.
  */
 function isOrchidWild(board: Board, owner: Owner): boolean {
   return hasLotusOutOfGate(board, owner);
@@ -202,8 +202,6 @@ function canCaptureOn(board: Board, fromIdx: number, targetIdx: number): Arrange
 
   const moverOrchidWild  = moverIsOrchid  && isOrchidWild(board, fromOwner);
   const targetOrchidWild = targetIsOrchid && isOrchidWild(board, targetOwner);
-
-  // --- wildcard rules for orchids --------------------------------------
 
   // 1) Anything can capture a *wild* orchid
   if (targetIsOrchid && targetOrchidWild) {
@@ -236,8 +234,8 @@ function canCaptureOn(board: Board, fromIdx: number, targetIdx: number): Arrange
 
   const aGarden = aDesc.garden as ("R" | "W");
   const bGarden = bDesc.garden as ("R" | "W");
-  const aNum = aDesc.number as (3 | 4 | 5);
-  const bNum = bDesc.number as (3 | 4 | 5);
+  const aNum = aDesc.number as 3 | 4 | 5;
+  const bNum = bDesc.number as 3 | 4 | 5;
 
   if (!isClashPair(aGarden, aNum, bGarden, bNum)) {
     return { ok: false, reason: "Capture allowed only when tiles clash" };
@@ -263,16 +261,15 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
   const startPacked = board.getAtIndex(fromIdx);
   if (!startPacked) return { ok: false, reason: "no tile at start" };
 
-   // Orchid freeze: if this piece is frozen, it cannot move at all.
-  // (We let rules.ts decide what counts as "trapped".)
+  // Orchid freeze
   if (isTrappedByOrchid(board, fromIdx)) {
     return { ok: false, reason: "piece is frozen by an Orchid" };
   }
-  
+
   const startPiece = unpackPiece(startPacked)!;
   const type = startPiece.type;
 
-  // Enforce numbered flower move ranges (3/4/5), Lotus (2), Orchid (6)
+  // Enforce move ranges
   const limit = maxArrangeSteps(type);
   if (limit !== null && path.length > limit) {
     return { ok: false, reason: `path too long for that tile (max ${limit})` };
@@ -282,7 +279,7 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
 
   for (let i = 0; i < path.length; i++) {
     const idx = path[i];
-    const { x, y } = coordsOf(idx - 1); // 1-based board index → 0-based coords index
+    const { x, y } = coordsOf(idx - 1);
     const isLast = (i === path.length - 1);
 
     const dx = x - px;
@@ -330,7 +327,8 @@ export function validateArrange(board: Board, fromIdx: number, path: number[]): 
 
 /* Build harmony graph.
    Nodes: blooming basic tiles (EXCLUDING Orchids);
-   Edges: share axis, lineOfSightClear, and isHarmonyActivePair (cancels for Rock/Knotweed).
+   Edges: share axis, lineOfSightClear, and isHarmonyActivePair.
+   Lotus is allowed to harmonize with basic flowers but NOT with another Lotus.
 */
 export function buildHarmonyGraph(board: Board): Map<number, number[]> {
   const pts = generateValidPoints();
@@ -340,8 +338,7 @@ export function buildHarmonyGraph(board: Board): Map<number, number[]> {
     const idx1 = i + 1;
     const desc = getPieceDescriptor(board, idx1);
 
-    // Must be blooming to harmonize:
-    if (!desc.blooming) continue;
+    if (desc.kind !== "basic" || !desc.blooming) continue;
 
     const packed = board.getAtIndex(idx1);
     if (!packed) continue;
@@ -349,9 +346,6 @@ export function buildHarmonyGraph(board: Board): Map<number, number[]> {
 
     // Orchids NEVER harmonize with anything.
     if (piece.type === TypeId.Orchid) continue;
-
-    // Lotus *is allowed* to harmonize.
-    // Flowers are allowed. Wheel/Rock/Boat/Knotweed are NOT blooming, so already filtered out.
 
     nodeIdxs.push(idx1);
   }
@@ -373,22 +367,40 @@ export function buildHarmonyGraph(board: Board): Map<number, number[]> {
       // Must not have blockers
       if (!lineOfSightClear(board, aIdx1, bIdx1)) continue;
 
-      // Get full descriptors
       const aDesc = getPieceDescriptor(board, aIdx1);
       const bDesc = getPieceDescriptor(board, bIdx1);
+      if (aDesc.kind !== "basic" || bDesc.kind !== "basic") continue;
 
-      // Orchids already filtered above, but double-protect:
-      if (aDesc.type === TypeId.Orchid || bDesc.type === TypeId.Orchid) continue;
+      const aPack = board.getAtIndex(aIdx1)!;
+      const bPack = board.getAtIndex(bIdx1)!;
+      const aPiece = unpackPiece(aPack)!;
+      const bPiece = unpackPiece(bPack)!;
 
-      // Lotus is allowed — so we do NOT enforce "basic" anymore.
-      // Let rules.ts decide harmony rules:
+      // Orchids double-guard
+      if (aPiece.type === TypeId.Orchid || bPiece.type === TypeId.Orchid) continue;
+
+      const aIsLotus = aPiece.type === TypeId.Lotus;
+      const bIsLotus = bPiece.type === TypeId.Lotus;
+      // Lotus cannot harmonize with another Lotus
+      if (aIsLotus && bIsLotus) continue;
+
       const aGarden = aDesc.garden as ("R" | "W");
       const bGarden = bDesc.garden as ("R" | "W");
       const aNum = aDesc.number as (3 | 4 | 5 | undefined);
       const bNum = bDesc.number as (3 | 4 | 5 | undefined);
 
-      // Harmony rules (Lotus always returns true inside isHarmonyActivePair)
-      if (isHarmonyActivePair(board, aIdx1, bIdx1, aGarden, aNum, bGarden, bNum)) {
+      // Let rules.ts handle Lotus logic; cast numbers to satisfy TS.
+      if (
+        isHarmonyActivePair(
+          board,
+          aIdx1,
+          bIdx1,
+          aGarden,
+          aNum as any,
+          bGarden,
+          bNum as any
+        )
+      ) {
         graph.set(aIdx1, (graph.get(aIdx1) || []).concat(bIdx1));
         graph.set(bIdx1, (graph.get(bIdx1) || []).concat(aIdx1));
       }
@@ -402,7 +414,7 @@ export function buildHarmonyGraph(board: Board): Map<number, number[]> {
 export type HarmonyEdge = {
   aIdx1: number;
   bIdx1: number;
-  owner: "host" | "guest"; // we tag by side that owns BOTH endpoints
+  owner: "host" | "guest"; // we tag by side that owns the harmony
 };
 
 export function listHarmonyEdges(board: Board): HarmonyEdge[] {
@@ -415,11 +427,10 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
     if (!aPack) continue;
 
     const aPiece = unpackPiece(aPack)!;
-    // Orchids never harmonize
-    if (aPiece.type === TypeId.Orchid) continue;
+    if (aPiece.type === TypeId.Orchid) continue; // orchids never harmonize
 
     const aDesc = getPieceDescriptor(board, aIdx1);
-    if (!aDesc.blooming) continue;
+    if (aDesc.kind !== "basic" || !aDesc.blooming) continue;
 
     const aC = coordsOf(aIdx1 - 1);
     if (!aC) continue;
@@ -430,11 +441,10 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
       if (!bPack) continue;
 
       const bPiece = unpackPiece(bPack)!;
-      // Orchids never harmonize
-      if (bPiece.type === TypeId.Orchid) continue;
+      if (bPiece.type === TypeId.Orchid) continue; // orchids never harmonize
 
       const bDesc = getPieceDescriptor(board, bIdx1);
-      if (!bDesc.blooming) continue;
+      if (bDesc.kind !== "basic" || !bDesc.blooming) continue;
 
       const bC = coordsOf(bIdx1 - 1);
       if (!bC) continue;
@@ -445,11 +455,20 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
 
       const aGarden = aDesc.garden as ("R" | "W");
       const bGarden = bDesc.garden as ("R" | "W");
-      // Allow undefined to let Lotus harmonize with anything
       const aNum = aDesc.number as (3 | 4 | 5 | undefined);
       const bNum = bDesc.number as (3 | 4 | 5 | undefined);
 
-      if (!isHarmonyActivePair(board, aIdx1, bIdx1, aGarden, aNum, bGarden, bNum)) {
+      if (
+        !isHarmonyActivePair(
+          board,
+          aIdx1,
+          bIdx1,
+          aGarden,
+          aNum as any,
+          bGarden,
+          bNum as any
+        )
+      ) {
         continue;
       }
 
@@ -458,11 +477,6 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
 
       // Lotus cannot harmonize with another Lotus
       if (aIsLotus && bIsLotus) continue;
-      
-
-      // Lotus cannot harmonize with another Lotus
-      if (aIsLotus && bIsLotus) continue;
-
 
       let edgeOwnerSide: "host" | "guest";
 
@@ -471,7 +485,7 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
         if (aDesc.owner !== bDesc.owner) continue;
         edgeOwnerSide = (aDesc.owner === Owner.Host ? "host" : "guest");
       } else {
-        // At least one Lotus: harmony belongs to the BASIC flower's owner
+        // At least one Lotus: harmony is owned by the basic flower
         const basicOwnerEnum = aIsLotus ? bDesc.owner : aDesc.owner;
         edgeOwnerSide = (basicOwnerEnum === Owner.Host ? "host" : "guest");
       }
@@ -486,7 +500,6 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
 
   return result;
 }
-
 
 /* Basic cycle detection + polygon test for center inclusion (0,0).
    We build simple cycles via DFS, then ray-cast to check if polygon encloses origin. */
@@ -526,7 +539,7 @@ export function findHarmonyRings(board: Board): number[][] {
 }
 
 function cycleEnclosesOrigin(cycle: number[]): boolean {
-  const pts = cycle.map((i1) => coordsOf(i1 - 1)); // coords need 0-based
+  const pts = cycle.map((i1) => coordsOf(i1 - 1));
   let inside = false;
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
     const xi = pts[i].x, yi = pts[i].y;
@@ -538,4 +551,3 @@ function cycleEnclosesOrigin(cycle: number[]): boolean {
   }
   return inside;
 }
-
