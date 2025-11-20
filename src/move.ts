@@ -415,7 +415,8 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
     if (!aPack) continue;
 
     const aPiece = unpackPiece(aPack)!;
-    if (aPiece.type === TypeId.Orchid) continue; // orchids never harmonize
+    // Orchids never harmonize with anything
+    if (aPiece.type === TypeId.Orchid) continue;
 
     const aDesc = getPieceDescriptor(board, aIdx1);
     if (!aDesc.blooming) continue;
@@ -429,12 +430,13 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
       if (!bPack) continue;
 
       const bPiece = unpackPiece(bPack)!;
-      if (bPiece.type === TypeId.Orchid) continue; // orchids never harmonize
+      // Orchids never harmonize with anything
+      if (bPiece.type === TypeId.Orchid) continue;
 
       const bDesc = getPieceDescriptor(board, bIdx1);
       if (!bDesc.blooming) continue;
 
-      // Only count harmonies between tiles of the SAME owner (for bonus logic)
+      // Bonus logic: only count harmonies between tiles of the SAME owner
       if (aDesc.owner !== bDesc.owner) continue;
 
       const bC = coordsOf(bIdx1 - 1);
@@ -446,10 +448,13 @@ export function listHarmonyEdges(board: Board): HarmonyEdge[] {
 
       const aGarden = aDesc.garden as ("R" | "W");
       const bGarden = bDesc.garden as ("R" | "W");
-      const aNum = aDesc.number as (3 | 4 | 5);
-      const bNum = bDesc.number as (3 | 4 | 5);
+      // Allow undefined numbers so Lotus can participate
+      const aNum = aDesc.number as (3 | 4 | 5 | undefined);
+      const bNum = bDesc.number as (3 | 4 | 5 | undefined);
 
-      if (!isHarmonyActivePair(board, aIdx1, bIdx1, aGarden, aNum, bGarden, bNum)) continue;
+      if (!isHarmonyActivePair(board, aIdx1, bIdx1, aGarden, aNum, bGarden, bNum)) {
+        continue;
+      }
 
       result.push({
         aIdx1,
