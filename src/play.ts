@@ -6,7 +6,7 @@ import { Board, TypeId, Owner, packPiece, unpackPiece } from "./board";
 import { coordsOf, indexOf } from "./coords";
 import { pickBestMove, applyPlannedArrange } from "./engine";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
-import { validateArrange, detectAnyClash, listHarmonyEdges } from "./move";
+import { validateArrange, detectAnyClash, listHarmonyEdges, findHarmonyRings} from "./move";
 import { getGardenType } from "./rules";
 
 // ---------- CLI ----------
