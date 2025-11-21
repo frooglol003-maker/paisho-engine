@@ -114,8 +114,36 @@ export function applyArrangeXY(
   fromXY: [number, number],
   pathXY: [number, number][]
 ) {
+  // Build a full 1-step-orthogonal path from the given waypoints.
+  // Each pair (current -> next) is expanded into a Manhattan path.
+  const [startX, startY] = fromXY;
+  let curX = startX;
+  let curY = startY;
+
+  const fullCoordPath: [number, number][] = [];
+
+  for (const [tx, ty] of pathXY) {
+    const stepX = Math.sign(tx - curX);
+    const stepY = Math.sign(ty - curY);
+
+    // Move horizontally until x matches
+    while (curX !== tx) {
+      curX += stepX;
+      fullCoordPath.push([curX, curY]);
+    }
+
+    // Then move vertically until y matches
+    while (curY !== ty) {
+      curY += stepY;
+      fullCoordPath.push([curX, curY]);
+    }
+  }
+
+  // Convert to 1-based indices
   const from = xyToIndex1(fromXY[0], fromXY[1]);
-  const path = pathXY.map(([x, y]) => xyToIndex1(x, y));
+  const path = fullCoordPath.map(([x, y]) => xyToIndex1(x, y));
+
+  // Let the normal arranger (with capture / garden / freeze rules) validate + apply
   return applyArrange(board, side, from, path);
 }
 
