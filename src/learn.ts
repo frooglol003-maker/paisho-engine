@@ -12,6 +12,7 @@ import { coordsOf } from "./coords";
 import { buildHarmonyGraph } from "./move";
 import { generateLegalArrangeMoves, Side } from "./engine";
 import { applySetup, applyAction, loadGames, GameRecord } from "./parse";
+import { parseNotationGame } from "./parseNotation";
 
 // ------- Feature extraction -------
 
@@ -71,6 +72,12 @@ function centerCount(board: Board): { host: number; guest: number } {
   }
   return { host, guest };
 }
+
+function loadNotationFile(path: string): GameRecord[] {
+  const raw = fs.readFileSync(path, "utf8");
+  return [parseNotationGame(path, raw)];
+}
+
 
 function mobility(board: Board): { host: number; guest: number } {
   const hostMoves = generateLegalArrangeMoves(board, "host").length;
