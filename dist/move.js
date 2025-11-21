@@ -10,6 +10,10 @@ exports.findHarmonyRings = findHarmonyRings;
 const coords_1 = require("./coords");
 const board_1 = require("./board");
 const rules_1 = require("./rules");
+
+console.log("validateArrange definition from dist/move.js:");
+console.log(validateArrange.toString());
+
 /* Utility to compute orthogonal neighbors (if valid intersection). */
 function orthogonalNeighborsIdx(idx) {
     const { x, y } = (0, coords_1.coordsOf)(idx);
