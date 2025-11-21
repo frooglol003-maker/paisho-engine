@@ -28,7 +28,8 @@ export type ActionIndex =
   | { kind: "arrange";     side: Side; from: number; path: number[] } // indices 1-based
   | { kind: "wheel";       side: Side; center: number }
   | { kind: "boatFlower";  side: Side; boat: number; from: number; to: number }
-  | { kind: "boatAccent";  side: Side; boat: number; target: number };
+  | { kind: "boatAccent";  side: Side; boat: number; target: number }
+  | { kind: "place";       side: Side; type: keyof typeof TypeIdNames; index: number };
 
 // XY-based actions (new)
 export type ActionXY =
