@@ -2,9 +2,10 @@
 // Converts your handwritten notation into a GameRecord.
 //
 // Supports lines like:
-//   0H.B,K,W,R
 //   1G.R3(0,-8)
-//   2H.(0,8)-(-1,7)+R4(-8,0)
+//   2H.(0,8)-(-1,7)
+//   4H.(0,8)-(1,7)+R4(-8,0)
+//   9G.(8,0)-(7,1)+B(-6,0)-(-7,-1)
 //   RESULT guest
 
 import { GameRecord, Placement, Action, Side, TypeIdNames } from "./parse";
@@ -42,33 +43,16 @@ export function parseNotationToGameRecord(text: string): GameRecord {
   const moves: Action[] = [];
   let result: "host" | "guest" | "draw" = "draw";
 
-  // 1) First find setup lines (ply 0)
-  for (const ln of lines) {
-    if (!ln.startsWith("0H.") && !ln.startsWith("0G.")) continue;
+  // NOTE: Your 0H.B,K,W,R / 0G.W,K,K,B lines describe pools, not board setup.
+  // We currently ignore them for board placement; pools are handled in play.ts.
+  // (We still support parsing them later if we ever want to record pools.)
 
-    const side = sideOf(ln[1]);
-
-    // Example: "0H.B,K,W,R"
-    const after = ln.slice(3);
-    const names = after.split(",").map(s => s.trim());
-    for (const n of names) {
-      const t = TypeIdNames[n];
-      if (!t) throw new Error(`Unknown piece in setup: ${n}`);
-      // For setup, no coordinates: the engine places them automatically?
-      // But you provided no XYs, so we can't put them on the board.
-      // Standard Paisho: 0H and 0G lines specify the pool pieces, not placements.
-      // So we IGNORE these as board placements; they only indicate pool availability.
-      // -> No placements added.
-    }
-  }
-
-  // 2) Parse move lines (ply >= 1)
   const moveLines: MoveLine[] = [];
 
   for (const ln of lines) {
     if (/^RESULT/i.test(ln)) {
       const parts = ln.split(/\s+/);
-      const r = parts[1]?.toLowerCase();
+      const r = (parts[1] ?? "").toLowerCase();
       if (r === "host") result = "host";
       else if (r === "guest") result = "guest";
       else result = "draw";
@@ -87,62 +71,78 @@ export function parseNotationToGameRecord(text: string): GameRecord {
 
   moveLines.sort((a, b) => a.ply - b.ply);
 
-  // 3) Convert each move into engine-style Action[]
   for (const ml of moveLines) {
     const side: Side = ml.side;
-
     const raw = ml.raw;
 
-    // PREFIXES:
-    //   R3(1,2) = placement
-    //   (x,y)-(x2,y2) = arrange
-    //   +(tile) = accent in same move
-    //   +R4(8,0) = place accent
-    //   +K(-6,-1) etc
-
-    // Check for composite moves like:
-    //    (0,8)-(1,7)+R4(-8,0)
-
+    // Split "main + accent + accent ..." parts
     const parts = raw.split("+").map(s => s.trim());
     const main = parts[0];
 
-    // 3A) Placement with TYPE(x,y)
+    // ------------------------------------------------------------------
+    // 3A) PLACEMENT main: TYPE(x,y)  e.g. R3(0,-8), L(8,0), O(0,8)
+    // ------------------------------------------------------------------
     const placeMatch = main.match(/^([A-Z][0-9A-Za-z]*)\((-?\d+),\s*(-?\d+)\)$/);
     if (placeMatch) {
-      const typeName = placeMatch[1];
+      const typeName = placeMatch[1] as keyof typeof TypeIdNames;
       const tx = parseInt(placeMatch[2], 10);
       const ty = parseInt(placeMatch[3], 10);
-
       const idx1 = xyToIndex1(tx, ty);
 
       moves.push({
         kind: "place",
         side,
         type: typeName,
-        index: idx1
+        index: idx1,
       } as any);
 
-      // Handle trailing accents (like +R4(-8,0))
+      // Accents after a placement, e.g. R3(0,-8)+K(-6,-1)
       for (let k = 1; k < parts.length; k++) {
         const acc = parts[k];
-        const mm = acc.match(/^([A-Z][0-9A-Za-z]*)\((-?\d+),\s*(-?\d+)\)$/);
-        if (!mm) throw new Error(`Bad accent: ${acc}`);
-        const tname = mm[1];
-        const ax = parseInt(mm[2], 10);
-        const ay = parseInt(mm[3], 10);
-        const idxA = xyToIndex1(ax, ay);
-        moves.push({
-          kind: "place",
-          side,
-          type: tname,
-          index: idxA
-        } as any);
+
+        // Accent placement: TYPE(x,y)
+        const accPlace = acc.match(/^([A-Z][0-9A-Za-z]*)\((-?\d+),\s*(-?\d+)\)$/);
+        if (accPlace) {
+          const aTypeName = accPlace[1] as keyof typeof TypeIdNames;
+          const ax = parseInt(accPlace[2], 10);
+          const ay = parseInt(accPlace[3], 10);
+          const aIdx = xyToIndex1(ax, ay);
+
+          moves.push({
+            kind: "place",
+            side,
+            type: aTypeName,
+            index: aIdx,
+          } as any);
+          continue;
+        }
+
+        // Boat accent: B(boatX,boatY)-(targetX,targetY)
+        const boatAcc = acc.match(/^B\((-?\d+),\s*(-?\d+)\)-\((-?\d+),\s*(-?\d+)\)$/);
+        if (boatAcc) {
+          const bx = parseInt(boatAcc[1], 10);
+          const by = parseInt(boatAcc[2], 10);
+          const tx = parseInt(boatAcc[3], 10);
+          const ty = parseInt(boatAcc[4], 10);
+
+          moves.push({
+            kind: "boatAccentXY",
+            side,
+            boatXY: [bx, by],
+            targetXY: [tx, ty],
+          } as any);
+          continue;
+        }
+
+        throw new Error(`Bad accent: ${acc}`);
       }
 
       continue;
     }
 
-    // 3B) Arrange moves: (x1,y1)-(x2,y2)
+    // ------------------------------------------------------------------
+    // 3B) ARRANGE main: (x1,y1)-(x2,y2)
+    // ------------------------------------------------------------------
     const arrMatch = main.match(/^\((-?\d+),\s*(-?\d+)\)-\((-?\d+),\s*(-?\d+)\)$/);
     if (arrMatch) {
       const x1 = parseInt(arrMatch[1], 10);
@@ -154,36 +154,63 @@ export function parseNotationToGameRecord(text: string): GameRecord {
         kind: "arrangeXY",
         side,
         fromXY: [x1, y1],
-        pathXY: [[x2, y2]]
-      });
+        pathXY: [[x2, y2]],
+      } as any);
 
-      // Accents still allowed
+      // Accents after arrange, e.g. (0,8)-(1,7)+R4(-8,0) or +B(-6,0)-(-7,-1)
       for (let k = 1; k < parts.length; k++) {
         const acc = parts[k];
-        const mm = acc.match(/^([A-Z][0-9A-Za-z]*)\((-?\d+),\s*(-?\d+)\)$/);
-        if (!mm) throw new Error(`Bad accent: ${acc}`);
-        const tname = mm[1];
-        const ax = parseInt(mm[2], 10);
-        const ay = parseInt(mm[3], 10);
-        const idxA = xyToIndex1(ax, ay);
-        moves.push({
-          kind: "place",
-          side,
-          type: tname,
-          index: idxA
-        } as any);
+
+        // Accent placement
+        const accPlace = acc.match(/^([A-Z][0-9A-Za-z]*)\((-?\d+),\s*(-?\d+)\)$/);
+        if (accPlace) {
+          const aTypeName = accPlace[1] as keyof typeof TypeIdNames;
+          const ax = parseInt(accPlace[2], 10);
+          const ay = parseInt(accPlace[3], 10);
+          const aIdx = xyToIndex1(ax, ay);
+
+          moves.push({
+            kind: "place",
+            side,
+            type: aTypeName,
+            index: aIdx,
+          } as any);
+          continue;
+        }
+
+        // Boat accent: B(boatX,boatY)-(targetX,targetY)
+        const boatAcc = acc.match(/^B\((-?\d+),\s*(-?\d+)\)-\((-?\d+),\s*(-?\d+)\)$/);
+        if (boatAcc) {
+          const bx = parseInt(boatAcc[1], 10);
+          const by = parseInt(boatAcc[2], 10);
+          const tx = parseInt(boatAcc[3], 10);
+          const ty = parseInt(boatAcc[4], 10);
+
+          moves.push({
+            kind: "boatAccentXY",
+            side,
+            boatXY: [bx, by],
+            targetXY: [tx, ty],
+          } as any);
+          continue;
+        }
+
+        throw new Error(`Bad accent: ${acc}`);
       }
 
       continue;
     }
 
+    // If we get here, we don't recognize the main pattern
     throw new Error(`Unrecognized notation: ${raw}`);
   }
 
-  return {
+  const game: GameRecord = {
     id: "notation",
     setup,
     moves,
-    result
+    result,
   };
+
+  return game;
 }
