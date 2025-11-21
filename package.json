@@ -7,7 +7,8 @@
   "scripts": {
     "build": "tsc",
     "test": "node dist/tests/run-tests.js",
-    "learn": "ts-node src/learn.ts",
+    "learn": "node dist/learn.js",
+    "learn:notation": "node dist/learn.js --notation",
     "demo": "ts-node src/demo.ts"
   },
   "devDependencies": {
