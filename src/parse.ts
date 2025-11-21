@@ -48,22 +48,29 @@ export type GameRecord = {
   result: Result;
 };
 
-// ====== Mapping piece names -> TypeId ======
 export const TypeIdNames: Record<string, TypeId> = {
+  // Flowers
   R3: TypeId.R3,
   R4: TypeId.R4,
   R5: TypeId.R5,
   W3: TypeId.W3,
   W4: TypeId.W4,
   W5: TypeId.W5,
+
+  // Specials – full names
   Lotus: TypeId.Lotus,
   Orchid: TypeId.Orchid,
   Rock: TypeId.Rock,
   Wheel: TypeId.Wheel,
   Boat: TypeId.Boat,
   Knotweed: TypeId.Knotweed,
-};
 
+  // Specials – notation shorthands used in games
+  L: TypeId.Lotus,     // +L(8,0)
+  O: TypeId.Orchid,    // +O(0,8)
+  K: TypeId.Knotweed,  // +K(-6,-1)
+  B: TypeId.Boat,      // +B(-6,0)-(-7,-1)
+};
 // ====== Helpers ======
 function toIndex1FromPlacement(p: Placement): number {
   if (typeof p.index === "number") return p.index;
