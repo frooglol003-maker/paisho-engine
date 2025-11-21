@@ -415,6 +415,14 @@ export function applyAction(board: Board, action: Action): Board {
     case "wheel":         return applyWheel(board, action.side, action.center);
     case "boatFlower":    return applyBoatFlower(board, action.side, action.boat, action.from, action.to);
     case "boatAccent":    return applyBoatAccent(board, action.side, action.boat, action.target);
+    case "place": {
+      const t = typeFromName(action.type);
+      const owner = toOwnerEnum(action.side);
+      const cloned = board.clone();
+      cloned.setAtIndex(action.index, packPiece(t, owner));
+      return cloned;
+    }
+
 
     // XY-based
     case "arrangeXY":     return applyArrangeXY(board, action.side, action.fromXY, action.pathXY);
