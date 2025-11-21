@@ -1,18 +1,27 @@
 // src/learn.ts
-// Learn linear eval weights from high-ELO games (JSONL).
+// Learn linear eval weights from games.
+// Two modes:
 //
-// Usage: npm run learn
+// 1) JSONL mode (default):
+//    node dist/learn.js
+//    -> reads data/sample_games.jsonl
 //
-// Reads: data/sample_games.jsonl
-// Writes: (prints code block to paste into src/eval.ts)
+// 2) Interactive notation mode:
+//    node dist/learn.js --notation
+//    -> prompts you to paste a single game in notation form,
+//       parses it via parseNotation.ts, plays it through,
+//       prints final board + learned weights block.
 
 import * as fs from "fs";
+import * as readline from "readline";
 import { Board, unpackPiece, TypeId } from "./board";
 import { coordsOf } from "./coords";
 import { buildHarmonyGraph } from "./move";
 import { generateLegalArrangeMoves, Side } from "./engine";
 import { applySetup, applyAction, loadGames, GameRecord } from "./parse";
-import { parseNotationGame } from "./parseNotation";
+
+// For dynamic require without TS complaining
+declare const require: any;
 
 // ------- Feature extraction -------
 
@@ -72,12 +81,6 @@ function centerCount(board: Board): { host: number; guest: number } {
   }
   return { host, guest };
 }
-
-function loadNotationFile(path: string): GameRecord[] {
-  const raw = fs.readFileSync(path, "utf8");
-  return [parseNotationGame(path, raw)];
-}
-
 
 function mobility(board: Board): { host: number; guest: number } {
   const hostMoves = generateLegalArrangeMoves(board, "host").length;
@@ -173,16 +176,78 @@ function invSymmetric(M: Mat): Mat {
   return I;
 }
 
-// ------- Learning driver -------
+// ------- Result -> scalar -------
 
 function resultToScore(res: "host" | "guest" | "draw"): number {
   return res === "host" ? +1 : res === "guest" ? -1 : 0;
 }
 
-async function main() {
+// ------- Simple ASCII board renderer (final position) -------
+
+function symPlain(type: TypeId): string {
+  switch (type) {
+    case TypeId.R3: return "R3";
+    case TypeId.R4: return "R4";
+    case TypeId.R5: return "R5";
+    case TypeId.W3: return "W3";
+    case TypeId.W4: return "W4";
+    case TypeId.W5: return "W5";
+    case TypeId.Lotus: return "L ";
+    case TypeId.Orchid: return "O ";
+    case TypeId.Rock: return "Ro";
+    case TypeId.Wheel: return "Wh";
+    case TypeId.Boat: return "Bo";
+    case TypeId.Knotweed: return "Kn";
+    default: return "· ";
+  }
+}
+
+/**
+ * Very simple ASCII diamond similar to play.ts, but no colors/sidebars.
+ * Just enough to visually confirm final positions after learning.
+ */
+function renderBoardAscii(board: Board): string {
+  const widths = [9,11,13,15, 17,17,17,17,17,17,17,17,17, 15,13,11,9];
+  const rowStarts: number[] = [];
+  let base = 1;
+  for (let r = 0; r < widths.length; r++) {
+    rowStarts[r] = base;
+    base += widths[r];
+  }
+
+  const lines: string[] = [];
+  for (let vr = 0; vr < widths.length; vr++) {
+    const r = widths.length - 1 - vr;
+    const w = widths[r];
+    const rowBase = rowStarts[r];
+
+    const padLeft = " ".repeat(17 - w);
+    const cells: string[] = [];
+
+    for (let c = 0; c < w; c++) {
+      const idx = rowBase + c;
+      const p = board.getAtIndex(idx);
+      if (!p) {
+        cells.push("· ");
+      } else {
+        const d = unpackPiece(p)!;
+        const sym = symPlain(d.type);
+        const owner = d.owner === 0 ? "H" : "G";
+        cells.push(owner + sym);
+      }
+    }
+
+    lines.push(padLeft + cells.join(" ") + padLeft);
+  }
+  return lines.join("\n");
+}
+
+// ------- JSONL learning (old behaviour) -------
+
+async function mainFromJSONL() {
   const path = "data/sample_games.jsonl";
   if (!fs.existsSync(path)) {
-    console.error(`Missing ${path}. Create it with one JSON object per line. See the template I provided.`);
+    console.error(`Missing ${path}. Create it with one JSON object per line.`);
     process.exit(1);
   }
   const games = await loadGames(path);
@@ -196,53 +261,52 @@ async function main() {
 
   for (const g of games) {
     const finalScore = resultToScore(g.result);
-    // Start from empty board each game
     let b = new Board();
     applySetup(b, g.setup);
 
-    // For each ply: record features for side-to-move pre-move (credit assignment is crude but works)
-    // Side alternates host, guest, host, ...
     let side: Side = "host";
     for (const action of g.moves) {
-      // (Optional sanity) ensure action.side matches expected side; if not, trust the action
       try {
-        // features before the move
         const f = extractFeatures(b);
         X.push([f.materialDiff, f.harmonyDegDiff, f.centerDiff, f.mobilityDiff]);
         y.push(finalScore);
 
-        // apply move
         b = applyAction(b, action);
       } catch (e: any) {
-        throw new Error(`Game ${g.id ?? "(no id)"}: failed to apply action ${JSON.stringify(action)}: ${e.message}`);
+        throw new Error(
+          `Game ${g.id ?? "(no id)"}: failed to apply action ${JSON.stringify(action)}: ${
+            e.message
+          }`
+        );
       }
       side = side === "host" ? "guest" : "host";
     }
   }
 
-  // Fit ridge regression
   const w = ridge(X, y, 1e-3);
   const [wMat, wHar, wCtr, wMob] = w;
 
-  // Print pasteable code for eval.ts
   console.log("\n---- Paste this block into src/eval.ts (replace the scoring section) ----\n");
   console.log(`// Learned weights from ${X.length} samples`);
-  console.log(`const WEIGHTS = { materialDiff: ${wMat.toFixed(6)}, harmonyDegDiff: ${wHar.toFixed(6)}, centerDiff: ${wCtr.toFixed(6)}, mobilityDiff: ${wMob.toFixed(6)} };`);
+  console.log(
+    `const WEIGHTS = { materialDiff: ${wMat.toFixed(
+      6
+    )}, harmonyDegDiff: ${wHar.toFixed(6)}, centerDiff: ${wCtr.toFixed(
+      6
+    )}, mobilityDiff: ${wMob.toFixed(6)} };`
+  );
   console.log(`
 export function evaluate(board: Board, pov: "host" | "guest"): number {
-  // Compute raw (host - guest) feature diffs, then flip by pov
-  const f = (function(){
-    const m = (${material.toString()})(board);
-    const h = (${harmonyDeg.toString()})(board);
-    const c = (${centerCount.toString()})(board);
-    const mo = (${mobility.toString()})(board);
-    return {
-      materialDiff: m.host - m.guest,
-      harmonyDegDiff: h.host - h.guest,
-      centerDiff: c.host - c.guest,
-      mobilityDiff: mo.host - mo.guest,
-    };
-  })();
+  const m = (${material.toString()})(board);
+  const h = (${harmonyDeg.toString()})(board);
+  const c = (${centerCount.toString()})(board);
+  const mo = (${mobility.toString()})(board);
+  const f = {
+    materialDiff: m.host - m.guest,
+    harmonyDegDiff: h.host - h.guest,
+    centerDiff: c.host - c.guest,
+    mobilityDiff: mo.host - mo.guest,
+  };
 
   const raw =
     WEIGHTS.materialDiff * f.materialDiff +
@@ -254,6 +318,103 @@ export function evaluate(board: Board, pov: "host" | "guest"): number {
 }
 `);
   console.log("---- end paste block ----\n");
+}
+
+// ------- Interactive notation learning -------
+
+async function mainFromNotation() {
+  console.log("Interactive notation mode.");
+  console.log("Paste a SINGLE game's notation (like your 0H./0G./1G... example).");
+  console.log("When you're done, enter a line with just 'END' and press Enter.\n");
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const lines: string[] = [];
+
+  for await (const line of rl) {
+    if (line.trim() === "END") break;
+    lines.push(line);
+  }
+  rl.close();
+
+  const text = lines.join("\n").trim();
+  if (!text) {
+    console.error("No notation provided.");
+    process.exit(1);
+  }
+
+  // Dynamically load your notation parser
+  const { parseNotationToGameRecord } = require("./parseNotation");
+  const game: GameRecord = parseNotationToGameRecord(text);
+
+  // Play game through on a Board and collect features
+  const finalScore = resultToScore(game.result);
+  const X: Mat = [];
+  const y: Vec = [];
+
+  let b = new Board();
+  applySetup(b, game.setup);
+
+  let side: Side = "host";
+  for (const action of game.moves) {
+    const f = extractFeatures(b);
+    X.push([f.materialDiff, f.harmonyDegDiff, f.centerDiff, f.mobilityDiff]);
+    y.push(finalScore);
+    b = applyAction(b, action);
+    side = side === "host" ? "guest" : "host";
+  }
+
+  console.log("\nFinal board position from this notation:\n");
+  console.log(renderBoardAscii(b));
+  console.log("\nLearning weights from THIS ONE GAME (toy training)…");
+
+  const w = ridge(X, y, 1e-3);
+  const [wMat, wHar, wCtr, wMob] = w;
+
+  console.log("\n---- Paste this block into src/eval.ts (replace the scoring section) ----\n");
+  console.log(`// Learned weights from ${X.length} samples (1 notation game)`);
+  console.log(
+    `const WEIGHTS = { materialDiff: ${wMat.toFixed(
+      6
+    )}, harmonyDegDiff: ${wHar.toFixed(6)}, centerDiff: ${wCtr.toFixed(
+      6
+    )}, mobilityDiff: ${wMob.toFixed(6)} };`
+  );
+  console.log(`
+export function evaluate(board: Board, pov: "host" | "guest"): number {
+  const m = (${material.toString()})(board);
+  const h = (${harmonyDeg.toString()})(board);
+  const c = (${centerCount.toString()})(board);
+  const mo = (${mobility.toString()})(board);
+  const f = {
+    materialDiff: m.host - m.guest,
+    harmonyDegDiff: h.host - h.guest,
+    centerDiff: c.host - c.guest,
+    mobilityDiff: mo.host - mo.guest,
+  };
+
+  const raw =
+    WEIGHTS.materialDiff * f.materialDiff +
+    WEIGHTS.harmonyDegDiff * f.harmonyDegDiff +
+    WEIGHTS.centerDiff   * f.centerDiff +
+    WEIGHTS.mobilityDiff * f.mobilityDiff;
+
+  return pov === "host" ? raw : -raw;
+}
+`);
+  console.log("---- end paste block ----\n");
+}
+
+// ------- entrypoint -------
+
+async function main() {
+  const args = process.argv.slice(2);
+  const useNotation = args.includes("--notation");
+
+  if (useNotation) {
+    await mainFromNotation();
+  } else {
+    await mainFromJSONL();
+  }
 }
 
 main().catch(e => {
