@@ -1168,6 +1168,15 @@ async function main() {
         continue;
       }
 
+      if (lower === "rings") {
+  const rings = getRingOwners(b);
+  console.log("Ring owners:", rings);
+
+  const cycles = findHarmonyRings(b); // if you export it from move.ts
+  console.log("Raw cycles:", cycles.map(c => c.map(i => coordsOf(i - 1))));
+  continue;
+}
+
       // Engine (plant if opening, else search)
       const engMatch = lower.match(/^engine(?:\s+(host|guest|me|other))?$/);
       if (engMatch) {
