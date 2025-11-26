@@ -27,6 +27,18 @@ type _WheelPlan = { center: number; moves: _IndexMove[] };
 type _BoatFlowerPlan = { boat: number; from: number; to: number };
 type _BoatAccentPlan = { boat: number; target: number; remove: number[] };
 
+// Core move kinds
+type ArrangeMove = { kind: "arrange"; from: number; path: number[] };
+type WheelMove = { kind: "wheel"; center: number };
+type BoatFlower = { kind: "boatFlower"; boat: number; from: number; to: number };
+type BoatAccent = { kind: "boatAccent"; boat: number; target: number };
+
+// Public move type (exported for external use, e.g. self-play / UI)
+export type EngineMove = ArrangeMove | WheelMove | BoatFlower | BoatAccent;
+
+// Internal alias for clarity
+type AnyMove = EngineMove;
+
 // ---------- Helpers ----------
 function opposite(s: Side): Side {
   return s === "host" ? "guest" : "host";
@@ -52,13 +64,11 @@ function isType(board: Board, idx1: number, t: TypeId): boolean {
   return d.type === t;
 }
 
-// ---------- Search core (alpha–beta + ordering + TT + time limit) ----------
-type ArrangeMove = { kind: "arrange"; from: number; path: number[] };
-type WheelMove = { kind: "wheel"; center: number };
-type BoatFlower = { kind: "boatFlower"; boat: number; from: number; to: number };
-type BoatAccent = { kind: "boatAccent"; boat: number; target: number };
-type AnyMove = ArrangeMove | WheelMove | BoatFlower | BoatAccent;
+function other(side: Side): Side {
+  return side === "host" ? "guest" : "host";
+}
 
+// ---------- Search core (alpha–beta + ordering + TT + time limit) ----------
 type Score = number;
 type TTFlag = "EXACT" | "LOWER" | "UPPER";
 
@@ -84,7 +94,7 @@ function TT_set(key: string, val: TTEntry) {
   TT.set(key, val);
 }
 
-// stats (for demo)
+// stats (for demo / debugging)
 export const searchStats = { nodes: 0, ttHits: 0, cutoffs: 0 };
 
 // Zobrist-based position key
@@ -137,7 +147,7 @@ function boardKey(board: Board, side: Side): string {
         tIdx = 11;
         break;
       default:
-        continue; // Empty
+        continue; // Empty / unknown
     }
     const oIdx = owner === Owner.Host ? 0 : 1;
     h = xor64(h, Z_PIECE[i][tIdx][oIdx]);
@@ -145,6 +155,8 @@ function boardKey(board: Board, side: Side): string {
   if (side === "guest") h = xor64(h, Z_SIDE);
   return key64(h);
 }
+
+// ---------- Move application ----------
 
 // Forward-declared in this file; function declarations are hoisted.
 export function applyPlannedArrange(board: Board, mv: PlannedArrange): Board {
@@ -171,6 +183,11 @@ function applyMoveCloned(board: Board, side: Side, mv: AnyMove): Board {
     case "boatAccent":
       return applyBoatAccent(board, side, mv.boat, mv.target);
   }
+}
+
+// Public helper for callers that want to step games forward.
+export function applyEngineMove(board: Board, side: Side, mv: EngineMove): Board {
+  return applyMoveCloned(board, side, mv);
 }
 
 // --- killer moves + history (declare AFTER AnyMove is defined) ---
@@ -201,12 +218,12 @@ function generateAllMoves(board: Board, side: Side): AnyMove[] {
       if (seen.has(key)) return;
       try {
         const child = applyMoveCloned(board, side, mv);
-        // NEW: filter out moves that produce a clash position
+        // filter out moves that produce a clash position
         if (detectAnyClash(child)) return;
         seen.add(key);
         moves.push(mv);
       } catch {
-        /* ignore unplayable bonus */
+        // ignore unplayable bonus
       }
     };
 
@@ -247,12 +264,13 @@ function orderMoves(
 ): AnyMove[] {
   const k1 = killers[ply]?.[0],
     k2 = killers[ply]?.[1];
+
   const scored = moves.map((mv) => {
     let landingIdx1 = -1;
     if (mv.kind === "arrange") landingIdx1 = mv.path[mv.path.length - 1];
     else if (mv.kind === "boatFlower") landingIdx1 = mv.to;
 
-       let centerBias = 0;
+    let centerBias = 0;
     if (landingIdx1 > 0) {
       const xy = coordsOf(landingIdx1 - 1) as any;
       if (xy) {
@@ -269,12 +287,11 @@ function orderMoves(
     }
 
     const shortPathBias = mv.kind === "arrange" ? -mv.path.length : 0;
+    const mvStr = JSON.stringify(mv);
     const killerBonus =
-      k1 && JSON.stringify(k1) === JSON.stringify(mv)
-        ? 5000
-        : k2 && JSON.stringify(k2) === JSON.stringify(mv)
-        ? 3000
-        : 0;
+      (k1 && JSON.stringify(k1) === mvStr) ? 5000 :
+      (k2 && JSON.stringify(k2) === mvStr) ? 3000 :
+      0;
     const histBonus = history.get(histKey(mv)) ?? 0;
 
     return {
@@ -285,10 +302,6 @@ function orderMoves(
 
   scored.sort((a, b) => b.key - a.key);
   return scored.map((s) => s.mv);
-}
-
-function other(side: Side): Side {
-  return side === "host" ? "guest" : "host";
 }
 
 interface SearchOpts {
@@ -306,13 +319,16 @@ function searchAlphaBeta(
   opts: SearchOpts,
   ply = 0
 ): { score: Score; best?: AnyMove } {
-  // node count
   searchStats.nodes++;
 
   // time check
   if (opts.maxMs && performance.now() - startMs > opts.maxMs) {
     return { score: evaluate(board, side) };
   }
+
+  // Keep originals for TT flag computation
+  const originalAlpha = alpha;
+  const originalBeta = beta;
 
   // TT probe
   const key = boardKey(board, side);
@@ -334,8 +350,8 @@ function searchAlphaBeta(
 
   // Try TT's best move first if present
   if (tt?.best) {
-    const k = JSON.stringify(tt.best);
-    const i = moves.findIndex((m) => JSON.stringify(m) === k);
+    const bestStr = JSON.stringify(tt.best);
+    const i = moves.findIndex((m) => JSON.stringify(m) === bestStr);
     if (i > 0) {
       const [mv] = moves.splice(i, 1);
       moves.unshift(mv);
@@ -348,25 +364,27 @@ function searchAlphaBeta(
 
   let best: AnyMove | undefined;
   let localAlpha = alpha;
-  let value = -Infinity as Score;
+  let value: Score = -Infinity;
 
-  for (const mv of moves) {
+  for (let idx = 0; idx < moves.length; idx++) {
+    const mv = moves[idx];
+
     let child: Board;
     try {
       child = applyMoveCloned(board, side, mv);
     } catch {
+      // If move application throws, skip this move
       continue;
     }
 
-    // moves passed through generateAllMoves already have clash filtered,
-    // so we don't re-check detectAnyClash here for speed.
+    // moves passed through generateAllMoves already have clash filtered
 
-    // Late Move Reductions: reduce depth for unpromising late moves
+    // Late Move Reductions: reduce depth for unpromising late quiet moves
     let newDepth = depth - 1;
-    const idxInList = moves.indexOf(mv);
     const isQuiet = mv.kind === "arrange"; // wheel/boat are tactical; search full depth
-    if (depth >= 3 && isQuiet && idxInList >= 6)
+    if (depth >= 3 && isQuiet && idx >= 6) {
       newDepth = Math.max(1, newDepth - 1);
+    }
 
     const res = searchAlphaBeta(
       child,
@@ -401,10 +419,16 @@ function searchAlphaBeta(
     }
   }
 
+  // Fallback in pathological case where every move threw
+  if (!best || value === -Infinity) {
+    const evalNow = evaluate(board, side);
+    return { score: evalNow };
+  }
+
   // Store in TT
   let flag: TTFlag = "EXACT";
-  if (value <= alpha) flag = "UPPER";
-  else if (value >= beta) flag = "LOWER";
+  if (value <= originalAlpha) flag = "UPPER";
+  else if (value >= originalBeta) flag = "LOWER";
   TT_set(key, { depth, score: value, flag, best });
 
   return { score: value, best };
@@ -429,8 +453,8 @@ function searchIterativeDeepening(
   let guess = 0;
 
   for (let d = 1; d <= maxDepth; d++) {
-    let alpha = guess - window,
-      beta = guess + window;
+    let alpha = guess - window;
+    let beta = guess + window;
     let result: { score: number; best?: AnyMove };
 
     while (true) {
@@ -492,7 +516,7 @@ export function generateLegalArrangeMoves(board: Board, side: Side): PlannedArra
       if (path.length > 0) {
         const valid = validateArrange(board, i, path);
         if (valid.ok) {
-          // NEW: simulate and filter out clash positions
+          // simulate and filter out clash positions
           const child = applyPlannedArrange(board, { from: i, path });
           if (!detectAnyClash(child)) {
             out.push({ from: i, path: path.slice() });
@@ -525,9 +549,62 @@ export function pickBestMove(
   side: Side,
   depth: number,
   opts?: { maxMs?: number }
-) {
+): EngineMove | null {
   const move = searchIterativeDeepening(board, side, depth, opts?.maxMs);
   return move || null;
+}
+
+// ---------- Simple self-play helper (engine vs. itself) ----------
+export interface SelfPlayStep {
+  side: Side;
+  move: EngineMove;
+  scoreAfterHostPOV: number;
+}
+
+export interface SelfPlayResult {
+  finalBoard: Board;
+  steps: SelfPlayStep[];
+  finalScoreHostPOV: number;
+  winner: Side | "draw";
+}
+
+/**
+ * Let the engine play against itself from a starting position.
+ * This is a generic helper; true game-end conditions should be
+ * enforced by the caller if needed.
+ */
+export function selfPlayGame(
+  initialBoard: Board,
+  startingSide: Side,
+  opts: { maxPlies?: number; depth?: number; maxMsPerMove?: number } = {}
+): SelfPlayResult {
+  const maxPlies = opts.maxPlies ?? 200;
+  const depth = opts.depth ?? 3;
+
+  let board = initialBoard.clone();
+  let side: Side = startingSide;
+  const steps: SelfPlayStep[] = [];
+
+  for (let ply = 0; ply < maxPlies; ply++) {
+    const mv = pickBestMove(board, side, depth, { maxMs: opts.maxMsPerMove });
+    if (!mv) {
+      // No move found: treat as terminal from evaluation POV.
+      break;
+    }
+
+    board = applyEngineMove(board, side, mv);
+    const scoreHost = evaluate(board, "host");
+    steps.push({ side, move: mv, scoreAfterHostPOV: scoreHost });
+    side = opposite(side);
+  }
+
+  const finalScoreHostPOV = evaluate(board, "host");
+  const winner =
+    finalScoreHostPOV > 0 ? ("host" as Side) :
+    finalScoreHostPOV < 0 ? ("guest" as Side) :
+    "draw";
+
+  return { finalBoard: board, steps, finalScoreHostPOV, winner };
 }
 
 // ---------------- Harmony Bonus move generation ----------------
@@ -611,4 +688,3 @@ export function generateBoatAccentBonusMoves(
   }
   return out;
 }
-
