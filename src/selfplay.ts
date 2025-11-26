@@ -1,31 +1,38 @@
 // src/selfplay.ts
-// Engine self-play + on-the-fly learning + rough Pai Sho-style notation.
+// Engine self-play seeded from real games + notation output + learned weights.
 //
 // Usage (after build):
 //   npm run build
-//   node dist/selfplay.js --games 5 --depth 3 --maxMs 500
+//   node dist/selfplay.js --games 5 --depth 3 --maxMs 500 --seedPath data/sample_games.jsonl
 //
 // What it does:
-//   - Runs N self-play games using your engine + current rules.
-//   - Prints each game in a Pai Sho–like notation.
-//   - Learns linear eval weights from ALL positions in those games
-//     (same features as learn.ts) and prints the new WEIGHTS block
-//     you can paste into eval.ts.
-//
-// NOTE: Because we don't see parse.ts here, notation is focused on
-//       Arrange + Boat Accent moves; Wheel / Boat Flower are printed
-//       in a readable but not yet "official" notation form.
+//   - Loads recorded games via parse.loadGames (same as learn.ts).
+//   - For each self-play run, picks a random game and random prefix of its moves,
+//     applies that prefix (using applySetup + applyAction) to get a mid-game position
+//     that obeys your actual rules.
+//   - From that position, lets the engine (Arrange + bonus) play against itself.
+//   - Prints the self-play part in Pai Sho–style notation to stdout.
+//   - Collects features for each self-play position and runs ridge regression
+//     to print a WEIGHTS block you can paste into eval.ts.
 
 import * as fs from "fs";
-import { Board } from "./board";
+import { Board, unpackPiece, TypeId } from "./board";
 import { coordsOf } from "./coords";
-import { generateLegalArrangeMoves, Side, EngineMove, pickBestMove, applyEngineMove } from "./engine";
-import { unpackPiece, TypeId } from "./board";
+import { buildHarmonyGraph } from "./move";
+import {
+  generateLegalArrangeMoves,
+  Side,
+  EngineMove,
+  pickBestMove,
+  applyEngineMove,
+} from "./engine";
+import { evaluate } from "./eval";
+import { applySetup, applyAction, loadGames, GameRecord } from "./parse";
 
-// For CLI detection
+// For CLI entry detection
 declare const require: any;
 
-// ---------------- Feature extraction (copied / adapted from learn.ts) ----------------
+// ---------------- Feature extraction (same style as learn.ts) ----------------
 
 type Features = {
   materialDiff: number;
@@ -36,12 +43,6 @@ type Features = {
 
 type Vec = number[];
 type Mat = number[][];
-
-// If you later want full harmony + material feature parity with learn.ts,
-// you can refactor those helpers into a shared module; here we keep a
-// simplified but compatible version.
-
-import { buildHarmonyGraph } from "./move";
 
 function material(board: Board): { host: number; guest: number } {
   const N = (board as any).size1Based ?? 249;
@@ -119,7 +120,7 @@ function extractFeatures(board: Board): Features {
   };
 }
 
-// -------- Ridge regression (same idea as learn.ts) --------
+// -------- Ridge regression (same structure as learn.ts) --------
 
 function transpose(A: Mat): Mat {
   const m = A.length,
@@ -207,11 +208,6 @@ function ridge(X: Mat, y: Vec, lambda = 1e-3): Vec {
   return mulVec(XTXinv, XTy);
 }
 
-// Map final game result (from host POV) to training target.
-// Here we'll simply say:
-//   host win  -> +1
-//   guest win -> -1
-//   draw      -> 0
 function resultToScoreFromHost(finalScoreHost: number): number {
   if (finalScoreHost > 0) return +1;
   if (finalScoreHost < 0) return -1;
@@ -233,11 +229,9 @@ function idx1ToXY(idx1: number): { x: number; y: number } {
 /**
  * Convert a single engine move into a Pai Sho–style notation line.
  *
- * NOTE:
- * - Arrange uses:   (x1,y1)-(x2,y2)
- * - Boat accent uses: B(boatX,boatY)-(targetX,targetY)
- * - Wheel & BoatFlower use ad-hoc comment-y formats for now,
- *   since parseNotation.ts doesn't define them yet.
+ * - Arrange:      (x1,y1)-(x2,y2)
+ * - Boat accent:  B(boatX,boatY)-({targetX},{targetY})
+ * - Wheel / BoatFlower: ad-hoc but readable comments for now.
  */
 function formatMoveNotation(ply: number, side: Side, mv: EngineMove): string {
   const s = sideShort(side);
@@ -250,14 +244,11 @@ function formatMoveNotation(ply: number, side: Side, mv: EngineMove): string {
     case "boatAccent": {
       const boat = idx1ToXY(mv.boat);
       const target = idx1ToXY(mv.target);
-      // In your handwritten notation this would normally be a +B(...) accent
-      // after an arrange. Since the engine treats it as its own move, we
-      // surface it directly here.
       return `${ply}${s}.B(${boat.x},${boat.y})-(${target.x},${target.y})`;
     }
     case "wheel": {
       const c = idx1ToXY(mv.center);
-      return `${ply}${s}.;WHEEL(${c.x},${c.y})`; // semi-colon = comment-ish
+      return `${ply}${s}.;WHEEL(${c.x},${c.y})`;
     }
     case "boatFlower": {
       const b = idx1ToXY(mv.boat);
@@ -272,29 +263,53 @@ function formatMoveNotation(ply: number, side: Side, mv: EngineMove): string {
 
 interface SelfPlayPositionSample {
   features: Features;
-  // final result from host POV for this game
   resultHost: number;
 }
 
 interface SelfPlayGameRecord {
   id: string;
+  seedGameId?: string | number;
+  seedPrefix: number;
   notationLines: string[];
   finalScoreHost: number;
 }
 
-export function playSingleSelfPlayGame(
+function makeSeedFromGames(
+  games: GameRecord[]
+): { board: Board; side: Side; seedGame: GameRecord; seedPrefix: number } {
+  const gi = Math.floor(Math.random() * games.length);
+  const seedGame = games[gi];
+
+  let board = new Board();
+  applySetup(board, seedGame.setup);
+
+  let side: Side = "host";
+  const maxPrefix = seedGame.moves.length;
+  const seedPrefix = maxPrefix === 0 ? 0 : Math.floor(Math.random() * (maxPrefix + 1));
+
+  for (let i = 0; i < seedPrefix; i++) {
+    const action = seedGame.moves[i];
+    board = applyAction(board, action);
+    side = side === "host" ? "guest" : "host";
+  }
+
+  return { board, side, seedGame, seedPrefix };
+}
+
+function playSingleSelfPlayGame(
   gameId: string,
+  games: GameRecord[],
   opts: { maxPlies?: number; depth?: number; maxMsPerMove?: number } = {}
 ): { game: SelfPlayGameRecord; samples: SelfPlayPositionSample[] } {
   const maxPlies = opts.maxPlies ?? 200;
   const depth = opts.depth ?? 3;
 
-  let board = new Board(); // if you have a custom setup, inject it instead
-  let side: Side = "host";
-  const notationLines: string[] = [];
+  const { board: startBoard, side: startSide, seedGame, seedPrefix } =
+    makeSeedFromGames(games);
 
-  // We'll store features for EACH position before a move,
-  // then label them with the final result at the end.
+  let board = startBoard;
+  let side: Side = startSide;
+  const notationLines: string[] = [];
   const positions: Features[] = [];
 
   let ply = 1;
@@ -304,33 +319,23 @@ export function playSingleSelfPlayGame(
       maxMs: opts.maxMsPerMove,
     });
 
-    if (!mv) break; // no legal move → terminal (from engine's POV)
+    if (!mv) break;
 
     // Record features BEFORE the move
     const f = extractFeatures(board);
     positions.push(f);
 
-    // Convert the move to notation
+    // Notation
     const line = formatMoveNotation(ply, side, mv);
     notationLines.push(line);
 
-    // Apply the move
+    // Apply move
     board = applyEngineMove(board, side, mv);
-
-    // Next side
     side = side === "host" ? "guest" : "host";
     ply++;
   }
 
-  // Final score from host POV: we derive winner & label from this.
-  // You can change this if you prefer a non-eval-based game-end.
-  const finalScoreHost = 0; // default if you don't want eval here
-
-  // If you prefer to use eval(board,"host"), uncomment this and
-  // import evaluate from "./eval":
-  // import { evaluate } from "./eval";
-  // const finalScoreHost = evaluate(board, "host");
-
+  const finalScoreHost = evaluate(board, "host");
   const resHost = resultToScoreFromHost(finalScoreHost);
 
   const samples: SelfPlayPositionSample[] = positions.map((feat) => ({
@@ -340,6 +345,8 @@ export function playSingleSelfPlayGame(
 
   const game: SelfPlayGameRecord = {
     id: gameId,
+    seedGameId: (seedGame as any).id,
+    seedPrefix,
     notationLines,
     finalScoreHost,
   };
@@ -373,30 +380,52 @@ async function main() {
   const depth = (args["depth"] as number) ?? 3;
   const maxMsPerMove = (args["maxMs"] as number) || undefined;
   const maxPlies = (args["maxPlies"] as number) ?? 200;
+  const seedPath = (args["seedPath"] as string) || "data/sample_games.jsonl";
 
   console.log(
     `Self-play: games=${numGames}, depth=${depth}, maxMsPerMove=${maxMsPerMove ?? "none"}, maxPlies=${maxPlies}`
   );
+  console.log(`Seeding from games in: ${seedPath}`);
+
+  if (!fs.existsSync(seedPath)) {
+    console.error(`Seed file not found: ${seedPath}`);
+    process.exit(1);
+  }
+
+  const games = await loadGames(seedPath);
+  if (games.length === 0) {
+    console.error("No games found in seed file.");
+    process.exit(1);
+  }
 
   const allSamples: SelfPlayPositionSample[] = [];
-  const allGames: SelfPlayGameRecord[] = [];
 
   for (let g = 0; g < numGames; g++) {
     const gameId = `selfplay_${Date.now()}_${g}`;
-    const { game, samples } = playSingleSelfPlayGame(gameId, {
+    const { game, samples } = playSingleSelfPlayGame(gameId, games, {
       depth,
       maxMsPerMove,
       maxPlies,
     });
 
-    allGames.push(game);
     allSamples.push(...samples);
 
-    console.log(`\n=== Game ${g + 1}/${numGames} (id=${game.id}) ===\n`);
+    console.log(`\n=== Game ${g + 1}/${numGames} (id=${game.id}) ===`);
+    console.log(
+      `# seeded from recorded game id=${String(
+        game.seedGameId ?? "?"
+      )} with prefix=${game.seedPrefix} moves\n`
+    );
     for (const ln of game.notationLines) {
       console.log(ln);
     }
-    console.log(`RESULT draw  (finalScoreHost=${game.finalScoreHost.toFixed(2)})`);
+
+    const winner =
+      game.finalScoreHost > 0 ? "host" : game.finalScoreHost < 0 ? "guest" : "draw";
+
+    console.log(
+      `RESULT ${winner}  (finalScoreHost=${game.finalScoreHost.toFixed(2)})`
+    );
   }
 
   if (allSamples.length === 0) {
@@ -404,9 +433,9 @@ async function main() {
     return;
   }
 
-  // Build X and y from allSamples
   const X: Mat = [];
   const y: Vec = [];
+
   for (const s of allSamples) {
     const f = s.features;
     X.push([f.materialDiff, f.harmonyDegDiff, f.centerDiff, f.mobilityDiff]);
@@ -423,7 +452,9 @@ async function main() {
       6
     )}, centerDiff: ${wCtr.toFixed(6)}, mobilityDiff: ${wMob.toFixed(6)}`
   );
-  console.log("\n---- Paste this block into src/eval.ts (replace scoring section) ----\n");
+  console.log(
+    "\n---- Paste this block into src/eval.ts (replace the scoring section) ----\n"
+  );
   console.log(`// Learned from self-play (${X.length} samples)`);
   console.log(
     `const WEIGHTS = { materialDiff: ${wMat.toFixed(
@@ -455,10 +486,6 @@ export function evaluate(board: Board, pov: "host" | "guest"): number {
 }
 `);
   console.log("---- end paste block ----\n");
-
-  // "Weight delta" here is effectively just these numbers vs whatever
-  // you currently have in eval.ts; you can subtract them by hand
-  // or adjust this script later to read your old WEIGHTS.
 }
 
 if (require.main === module) {
