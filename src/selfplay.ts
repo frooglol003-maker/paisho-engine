@@ -290,13 +290,21 @@ function makeSeedFromGames(games: GameRecord[]): {
     };
   }
 
-  const MAX_TRIES = 20;
+  const MAX_TRIES = 40;
 
   for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
     const g = games[Math.floor(Math.random() * games.length)];
+
+    // Prefer prefixes > 0 so we land in a middlegame-ish position.
     const maxPrefix = g.moves.length;
-    const prefix =
-      maxPrefix === 0 ? 0 : Math.floor(Math.random() * (maxPrefix + 1));
+    if (maxPrefix === 0) {
+      // nothing to seed from here, try another game
+      continue;
+    }
+
+    // Choose a prefix between 1 and maxPrefix inclusive.
+    // (You can bump the lower bound to 3–4 if you want deeper openings.)
+    const prefix = 1 + Math.floor(Math.random() * maxPrefix);
 
     let b = new Board();
     applySetup(b, g.setup);
@@ -305,12 +313,33 @@ function makeSeedFromGames(games: GameRecord[]): {
     try {
       for (let i = 0; i < prefix; i++) {
         const action = g.moves[i];
-        // applyAction returns a new Board (same pattern as in learn.ts)
         b = applyAction(b, action);
         side = side === "host" ? "guest" : "host";
       }
 
-      // If we got here, this game+prefix is legal under current rules.
+      // Now check whether this seed is actually a sensible starting point.
+
+      // 1) Skip positions where someone already has a ring.
+      const rings = getRingOwners(b);
+      if (rings.host || rings.guest) {
+        console.warn(
+          `Seed position from game ${g.id ?? "(no id)"} prefix ${prefix} already has a ring; skipping.`
+        );
+        continue;
+      }
+
+      // 2) Skip positions where either side has no legal arrange moves.
+      const hostMoves = generateLegalArrangeMoves(b, "host").length;
+      const guestMoves = generateLegalArrangeMoves(b, "guest").length;
+
+      if (hostMoves === 0 || guestMoves === 0) {
+        console.warn(
+          `Seed position from game ${g.id ?? "(no id)"} prefix ${prefix} has hostMoves=${hostMoves}, guestMoves=${guestMoves}; skipping.`
+        );
+        continue;
+      }
+
+      // Looks good: both sides have mobility, no ring yet.
       return {
         board: b,
         side,
@@ -323,13 +352,13 @@ function makeSeedFromGames(games: GameRecord[]): {
           e?.message ?? e
         }`
       );
-      // try another game on the next loop iteration
+      // Try another game on the next iteration.
     }
   }
 
-  // If all attempts failed (old data doesn’t match new rules), just start fresh.
+  // If all attempts failed (bad data or very strict filters), just start fresh.
   console.warn(
-    "Seeding from sample_games.jsonl failed repeatedly; starting from empty board."
+    "Seeding from sample_games.jsonl failed to find a good position; starting from empty board."
   );
   return {
     board: new Board(),
