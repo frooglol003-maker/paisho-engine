@@ -331,6 +331,15 @@ function playSingleSelfPlayGame(
 
     // Apply move
     board = applyEngineMove(board, side, mv);
+
+    // DEBUG: how many moves does the *next* side have?
+  const hostMoves = generateLegalArrangeMoves(board, "host").length;
+  const guestMoves = generateLegalArrangeMoves(board, "guest").length;
+  console.log(
+    `DEBUG after ply ${ply}: hostMoves=${hostMoves}, guestMoves=${guestMoves}`
+  );
+
+    
     side = side === "host" ? "guest" : "host";
     ply++;
   }
