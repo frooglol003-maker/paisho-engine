@@ -335,10 +335,6 @@ function searchAlphaBeta(
 
   // Zobrist-based position key (already defined above as boardKey)
 
-// Exported wrapper so other modules (selfplay, tests, etc.) can detect repetitions.
-export function positionKey(board: Board, side: Side): string {
-  return boardKey(board, side);
-}
 
   const tt = TT.get(key);
   if (tt && tt.depth >= depth) {
