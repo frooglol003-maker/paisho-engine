@@ -1,6 +1,7 @@
 // src/engine.ts
 // Multi-step Arrange move gen + fast alpha–beta search + Harmony Bonus generators,
-// with ring wins as primary and alt-win (cross-midline harmony) as secondary.
+// with ring wins as primary and alt-win (cross-midline harmony) as secondary,
+// and support for a per-player tile pool for accurate alt-win detection.
 
 import { performance } from "perf_hooks";
 import { coordsOf, NEIGHBORS4_1, NEIGHBORS8_1 } from "./coords";
@@ -45,13 +46,48 @@ export type EngineMove = ArrangeMove | WheelMove | BoatFlower | BoatAccent;
 // Internal alias
 type AnyMove = EngineMove;
 
+// ---------- Tile pool + engine state ----------
+
+/**
+ * Minimal tile pool used for alt-win:
+ * we only need to know how many *standard flowers* remain in reserve
+ * for each side. You can extend this later with per-type counts if needed.
+ */
+export interface TilePool {
+  hostStandardReserve: number;
+  guestStandardReserve: number;
+}
+
+/**
+ * Full engine state: board + tile pool.
+ * Search uses this when you want exact alt-win behavior.
+ */
+export interface EngineState {
+  board: Board;
+  pool: TilePool;
+}
+
+/**
+ * Convenience helper to build an EngineState from a Board and partial pool.
+ * If you just want "board-only" behavior (no reserves), leave pool undefined
+ * and both reserves will default to 0.
+ */
+export function makeEngineState(
+  board: Board,
+  pool?: Partial<TilePool>
+): EngineState {
+  return {
+    board,
+    pool: {
+      hostStandardReserve: pool?.hostStandardReserve ?? 0,
+      guestStandardReserve: pool?.guestStandardReserve ?? 0,
+    },
+  };
+}
+
 // ---------- Helpers ----------
 function opposite(s: Side): Side {
   return s === "host" ? "guest" : "host";
-}
-
-function sideToOwner(side: Side): Owner {
-  return side === "host" ? Owner.Host : Owner.Guest;
 }
 
 function belongsTo(packed: number | null, side: Side): boolean {
@@ -89,7 +125,12 @@ function isStandardFlower(t: TypeId): boolean {
   );
 }
 
-// ---------- Zobrist-based position key ----------
+// ---------- Board-only Zobrist key (kept for compatibility) ----------
+
+/**
+ * Hash *board-only* + side-to-move.
+ * Used by callers that don't care about the pool.
+ */
 export function boardKey(board: Board, side: Side): string {
   const N: number = (board as any).size1Based ?? 249;
   let h: [number, number] = [0, 0];
@@ -124,6 +165,17 @@ export function boardKey(board: Board, side: Side): string {
   return key64(h);
 }
 
+/**
+ * Full state key (board + pool + side). Used internally by the TT.
+ * Keeps boardKey semantics but appends pool info so different reserves
+ * are not conflated.
+ */
+function stateKey(state: EngineState, side: Side): string {
+  const base = boardKey(state.board, side);
+  const poolPart = `${state.pool.hostStandardReserve},${state.pool.guestStandardReserve}`;
+  return `${base}|${poolPart}`;
+}
+
 // ---------- Move application ----------
 
 // Forward-declared in this file; function declarations are hoisted.
@@ -138,7 +190,7 @@ export function applyPlannedArrange(board: Board, mv: PlannedArrange): Board {
   return cloned;
 }
 
-// Make move on a cloned board and return it.
+// Make move on a cloned board and return it (board-only).
 function applyMoveCloned(board: Board, side: Side, mv: AnyMove): Board {
   switch (mv.kind) {
     case "arrange":
@@ -152,7 +204,24 @@ function applyMoveCloned(board: Board, side: Side, mv: AnyMove): Board {
   }
 }
 
-// Public helper for callers that want to step games forward.
+/**
+ * Apply a move to a full EngineState. For now we *don't* mutate the pool here
+ * because pool changes (planting from reserve, captures) live in your higher-level
+ * game logic. The engine’s job is:
+ *   - detect ring wins from the board,
+ *   - detect alt-win *given current* pool + board.
+ */
+function applyMoveClonedState(
+  state: EngineState,
+  side: Side,
+  mv: AnyMove
+): EngineState {
+  const newBoard = applyMoveCloned(state.board, side, mv);
+  // Pool is treated as "current reserves", not simulated into the future.
+  return { board: newBoard, pool: state.pool };
+}
+
+// Public helper for callers that want to step games forward (board-only).
 export function applyEngineMove(board: Board, side: Side, mv: EngineMove): Board {
   return applyMoveCloned(board, side, mv);
 }
@@ -163,9 +232,7 @@ const RING_WIN_SCORE = 10_000;
 const ALT_WIN_SCORE  = 5_000;
 
 /**
- * Count how many standard flowers a given owner has on the board.
- * (We don't track reserves explicitly, so we use "on-board standard flowers"
- *  as the proxy for "still has flowers".)
+ * Count how many standard flowers a given owner has on the *board*.
  */
 function countStandardFlowersOnBoard(board: Board, owner: Owner): number {
   const N = (board as any).size1Based ?? 249;
@@ -181,39 +248,51 @@ function countStandardFlowersOnBoard(board: Board, owner: Owner): number {
 }
 
 /**
- * Cross-midline harmony score:
- *  - Uses buildHarmonyGraph(board)
- *  - Only counts edges between same-owner pieces that lie on opposite sides of
- *    the horizontal midline y = 0.
- *  - Each adjacency contributes 1; double-counting is fine since it's symmetric
- *    between players.
+ * Cross-midline harmony score with your exact rule:
+ *   - We take edges from buildHarmonyGraph(board).
+ *   - Edge counts if:
+ *       * pieces share x OR share y, AND
+ *       * the *other* coordinate has one positive and one negative, AND
+ *       * neither piece is exactly on the relevant midline (0).
+ *
+ *   Examples:
+ *     shareX: (0,5)–(0,-3) → y coords +5 / -3 → counts (vertical line across y=0).
+ *     shareY: (4,0)–(-2,0) → x coords +4 / -2 → counts (horizontal line across x=0).
+ *     if either coordinate on that axis is 0 → does NOT count.
  */
 function crossMidlineHarmonyScore(board: Board, owner: Owner): number {
   const g = buildHarmonyGraph(board);
   let score = 0;
 
   for (const [idx, neighbors] of g) {
-    const p = board.getAtIndex(idx);
-    if (!p) continue;
-    const d = unpackPiece(p)!;
-    if (d.owner !== owner) continue;
+    const p1 = board.getAtIndex(idx);
+    if (!p1) continue;
+    const d1 = unpackPiece(p1)!;
+    if (d1.owner !== owner) continue;
 
     const { x: x1, y: y1 } = coordsOf(idx - 1);
-    const side1 = Math.sign(y1); // -1, 0, or 1
 
     for (const n of neighbors) {
-      const q = board.getAtIndex(n);
-      if (!q) continue;
-      const d2 = unpackPiece(q)!;
+      if (n <= idx) continue; // avoid double counting each undirected edge
+      const p2 = board.getAtIndex(n);
+      if (!p2) continue;
+      const d2 = unpackPiece(p2)!;
       if (d2.owner !== owner) continue;
 
       const { x: x2, y: y2 } = coordsOf(n - 1);
-      const side2 = Math.sign(y2);
 
-      // Require opposite sides of the horizontal midline (ignore exactly-on-midline)
-      if (side1 === 0 || side2 === 0) continue;
-      if (side1 * side2 === -1) {
-        score++;
+      const shareX = x1 === x2;
+      const shareY = y1 === y2;
+      if (!shareX && !shareY) continue;
+
+      if (shareX) {
+        // vertical line, crossing horizontal midline y=0
+        if (y1 === 0 || y2 === 0) continue;
+        if (y1 * y2 < 0) score++;
+      } else {
+        // shareY → horizontal line, crossing vertical midline x=0
+        if (x1 === 0 || x2 === 0) continue;
+        if (x1 * x2 < 0) score++;
       }
     }
   }
@@ -222,29 +301,38 @@ function crossMidlineHarmonyScore(board: Board, owner: Owner): number {
 }
 
 /**
- * Terminal scoring from the POV of `pov`.
- * - Returns null if position is non-terminal.
+ * Terminal scoring given full EngineState and POV.
+ * - Returns null if non-terminal.
  * - Otherwise returns a large-magnitude score encoding:
  *      ring win  >  alt-win  >  draw
+ *
+ * Alt-win condition:
+ *   When at least one side has *no standard flowers alive*, where
+ *   alive = on-board + reserve pool.
  */
-function terminalScore(board: Board, pov: Side): number | null {
-  const rings = getRingOwners(board); // assumed shape: { host: boolean; guest: boolean }
+function terminalScoreState(state: EngineState, pov: Side): number | null {
+  const { board, pool } = state;
+
+  const rings = getRingOwners(board); // { host: boolean; guest: boolean }
 
   // 1) Ring win takes absolute precedence
   if (rings.host || rings.guest) {
     if (rings.host && rings.guest) {
-      // extremely unlikely but well-defined: both made a ring → draw
+      // both form a ring: call it a draw
       return 0;
     }
     const winner: Side = rings.host ? "host" : "guest";
     return winner === pov ? +RING_WIN_SCORE : -RING_WIN_SCORE;
   }
 
-  // 2) Alt win: when at least one party has no standard flowers on the board
-  const hostFlowers = countStandardFlowersOnBoard(board, Owner.Host);
-  const guestFlowers = countStandardFlowersOnBoard(board, Owner.Guest);
+  // 2) Alt win: when at least one party has no standard flowers alive
+  const hostOnBoard = countStandardFlowersOnBoard(board, Owner.Host);
+  const guestOnBoard = countStandardFlowersOnBoard(board, Owner.Guest);
 
-  if (hostFlowers === 0 || guestFlowers === 0) {
+  const hostTotal = hostOnBoard + pool.hostStandardReserve;
+  const guestTotal = guestOnBoard + pool.guestStandardReserve;
+
+  if (hostTotal === 0 || guestTotal === 0) {
     const hostScore = crossMidlineHarmonyScore(board, Owner.Host);
     const guestScore = crossMidlineHarmonyScore(board, Owner.Guest);
 
@@ -258,6 +346,17 @@ function terminalScore(board: Board, pov: Side): number | null {
 
   // Non-terminal
   return null;
+}
+
+/**
+ * Board-only terminal scoring, for legacy callers that don't track pool.
+ * This is equivalent to running with a pool of 0/0 reserves — i.e., your
+ * previous behavior where "out of flowers" meant "no standard flowers
+ * on the board".
+ */
+function terminalScoreBoard(board: Board, pov: Side): number | null {
+  const state = makeEngineState(board); // pool = {0,0}
+  return terminalScoreState(state, pov);
 }
 
 // ---------- Search core (alpha–beta + ordering + TT + time limit) ----------
@@ -406,8 +505,11 @@ interface SearchOpts {
   maxMs?: number; // soft time limit
 }
 
-function searchAlphaBeta(
-  board: Board,
+/**
+ * Core negamax alpha–beta on full EngineState.
+ */
+function searchAlphaBetaState(
+  state: EngineState,
   side: Side,
   depth: number,
   alpha: Score,
@@ -420,11 +522,11 @@ function searchAlphaBeta(
 
   // 0) Time check
   if (opts.maxMs && performance.now() - startMs > opts.maxMs) {
-    return { score: evaluate(board, side) };
+    return { score: evaluate(state.board, side) };
   }
 
   // 1) Terminal check (ring / alt-win)
-  const tScore = terminalScore(board, side);
+  const tScore = terminalScoreState(state, side);
   if (tScore !== null) {
     return { score: tScore };
   }
@@ -434,7 +536,7 @@ function searchAlphaBeta(
   const originalBeta = beta;
 
   // 2) TT probe
-  const key = boardKey(board, side);
+  const key = stateKey(state, side);
   const tt = TT.get(key);
   if (tt && tt.depth >= depth) {
     searchStats.ttHits++;
@@ -445,11 +547,11 @@ function searchAlphaBeta(
   }
 
   if (depth === 0) {
-    return { score: evaluate(board, side) };
+    return { score: evaluate(state.board, side) };
   }
 
   // 3) Generate & order
-  const moves = orderMoves(board, side, generateAllMoves(board, side), ply);
+  const moves = orderMoves(state.board, side, generateAllMoves(state.board, side), ply);
 
   // Try TT's best move first if present
   if (tt?.best) {
@@ -462,9 +564,8 @@ function searchAlphaBeta(
   }
 
   if (moves.length === 0) {
-    // No moves → treat as terminal from eval POV (but we already checked
-    // ring/alt-win above, so this is just "stuck" = static evaluation).
-    return { score: evaluate(board, side) };
+    // No moves → static evaluation (ring/alt already checked above)
+    return { score: evaluate(state.board, side) };
   }
 
   let best: AnyMove | undefined;
@@ -474,9 +575,9 @@ function searchAlphaBeta(
   for (let idx = 0; idx < moves.length; idx++) {
     const mv = moves[idx];
 
-    let child: Board;
+    let child: EngineState;
     try {
-      child = applyMoveCloned(board, side, mv);
+      child = applyMoveClonedState(state, side, mv);
     } catch {
       continue; // move application threw → skip this move
     }
@@ -488,7 +589,7 @@ function searchAlphaBeta(
       newDepth = Math.max(1, newDepth - 1);
     }
 
-    const res = searchAlphaBeta(
+    const res = searchAlphaBetaState(
       child,
       other(side),
       newDepth,
@@ -523,7 +624,7 @@ function searchAlphaBeta(
 
   // Fallback if every move threw for some reason
   if (!best || value === -Infinity) {
-    const evalNow = evaluate(board, side);
+    const evalNow = evaluate(state.board, side);
     return { score: evalNow };
   }
 
@@ -536,9 +637,9 @@ function searchAlphaBeta(
   return { score: value, best };
 }
 
-// Iterative deepening wrapper with optional time limit (aspiration windows).
-function searchIterativeDeepening(
-  board: Board,
+// Iterative deepening wrapper with optional time limit (aspiration windows) on EngineState.
+function searchIterativeDeepeningState(
+  state: EngineState,
   side: Side,
   maxDepth: number,
   maxMs?: number
@@ -560,7 +661,7 @@ function searchIterativeDeepening(
     let result: { score: number; best?: AnyMove };
 
     while (true) {
-      result = searchAlphaBeta(board, side, d, alpha, beta, start, {
+      result = searchAlphaBetaState(state, side, d, alpha, beta, start, {
         maxDepth,
         maxMs,
       });
@@ -646,13 +747,37 @@ export function generateLegalArrangeMoves(board: Board, side: Side): PlannedArra
 }
 
 // ---------- Public search entry ----------
+
+/**
+ * New API: search with full EngineState (board + pool).
+ * Use this if you want correct alt-win behavior when reserves hit zero.
+ */
+export function pickBestMoveWithPool(
+  state: EngineState,
+  side: Side,
+  depth: number,
+  opts?: { maxMs?: number }
+): EngineMove | null {
+  const move = searchIterativeDeepeningState(state, side, depth, opts?.maxMs);
+  return move || null;
+}
+
+/**
+ * Legacy API: search using only a Board.
+ * This behaves like your previous engine:
+ *   - Pool reserves are treated as 0.
+ *   - Alt-win is effectively "no standard flowers on the board".
+ *
+ * selfplay.ts and any older callers can stay on this.
+ */
 export function pickBestMove(
   board: Board,
   side: Side,
   depth: number,
   opts?: { maxMs?: number }
 ): EngineMove | null {
-  const move = searchIterativeDeepening(board, side, depth, opts?.maxMs);
+  const state = makeEngineState(board); // reserves 0/0
+  const move = searchIterativeDeepeningState(state, side, depth, opts?.maxMs);
   return move || null;
 }
 
@@ -672,8 +797,9 @@ export interface SelfPlayResult {
 
 /**
  * Let the engine play against itself from a starting position.
- * This is a generic helper; true game-end conditions should be
- * enforced by the caller if needed.
+ * Board-only version; alt-win uses "no standard flowers on board" proxy.
+ * For a full game with tile pools, you probably want your own loop that
+ * maintains EngineState and calls pickBestMoveWithPool.
  */
 export function selfPlayGame(
   initialBoard: Board,
