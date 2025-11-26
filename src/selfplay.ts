@@ -14,8 +14,8 @@
 //   - After each move, if the moving side created new harmonies,
 //     it automatically takes a HARMONY BONUS as a **plant** into an empty gate,
 //     respecting tile pools.
-//     • Bonus planting now prioritizes STANDARD FLOWERS that actually harmonize,
-//       so they can chain more bonuses.
+//     • Bonus planting now prefers STANDARD FLOWERS; Lotus/Orchid are only used
+//       when no standard flowers remain in that side's pool.
 //   - The bonus plant is encoded as an accent in notation:  5H.(...)-(...)+TYPE(x,y)
 //   - Prints the self-play game in Pai Sho–style notation.
 //   - Collects features and runs ridge regression to print a WEIGHTS block.
@@ -441,14 +441,17 @@ function harmonyFromNewPlant(
 
 /**
  * Choose the best bonus plant (type + gate) for a side:
- *   1) Consider STANDARD_FLOWERS that the pool still has.
- *      For each empty gate, simulate placing that flower and
- *      count how many harmonies the new piece gets.
- *      Take the (type, gate) with highest harmony count.
- *      If bestScore > 0, use that.
- *   2) If no standard flower yields any harmony, repeat the process
- *      for SPECIAL_FLOWERS (Lotus/Orchid). We allow them even with 0
- *      new harmonies, as a fallback.
+ *
+ *   1) If there is **any standard flower** left in the pool (R3–R5, W3–W5),
+ *      we ONLY consider those. We pick the (type, gate) with the highest
+ *      harmony count for the new piece. We do NOT require that count to be > 0;
+ *      if all candidates are 0, we still pick the best (development).
+ *
+ *   2) Only when **no standard flowers remain** for that side do we allow
+ *      SPECIAL_FLOWERS (Lotus / Orchid) as bonus plants, again picking the
+ *      position that yields the most harmonies.
+ *
+ * This explicitly prunes the early “Lotus spam” behavior.
  */
 function pickBonusPlant(
   board: Board,
@@ -457,12 +460,9 @@ function pickBonusPlant(
   const rem = remainingFromBoard(board);
   const pool = side === "host" ? rem.host : rem.guest;
 
-  // Higher-level helper to scan over a set of piece types
-  const scanTypes = (types: TypeId[]): {
-    type: TypeId | null;
-    gate: { x: number; y: number } | null;
-    score: number;
-  } => {
+  const scanTypes = (
+    types: TypeId[]
+  ): { type: TypeId | null; gate: { x: number; y: number } | null; score: number } => {
     let bestType: TypeId | null = null;
     let bestGate: { x: number; y: number } | null = null;
     let bestScore = -Infinity;
@@ -487,14 +487,22 @@ function pickBonusPlant(
     return { type: bestType, gate: bestGate, score: bestScore };
   };
 
-  // 1) Try standard flowers first, require >0 harmonies.
-  const stdRes = scanTypes(STANDARD_FLOWERS);
-  if (stdRes.type && stdRes.gate && stdRes.score > 0) {
-    const name = keyForType(stdRes.type)!;
-    return { type: stdRes.type, gate: stdRes.gate, typeName: name };
+  // Do we have *any* standard flowers left?
+  const hasStandardLeft = STANDARD_FLOWERS.some((t) => {
+    const key = keyForType(t)!;
+    return (pool[key] ?? 0) > 0;
+  });
+
+  if (hasStandardLeft) {
+    const stdRes = scanTypes(STANDARD_FLOWERS);
+    if (stdRes.type && stdRes.gate) {
+      const name = keyForType(stdRes.type)!;
+      return { type: stdRes.type, gate: stdRes.gate, typeName: name };
+    }
+    // If something went weird and we couldn't pick, fall through to specials.
   }
 
-  // 2) Fallback: specials, even if they don't create new harmonies.
+  // Only when all standard flowers are gone do we allow Lotus/Orchid.
   const spRes = scanTypes(SPECIAL_FLOWERS);
   if (spRes.type && spRes.gate) {
     const name = keyForType(spRes.type)!;
@@ -751,7 +759,9 @@ async function main() {
 
     console.log(`\n=== Game ${g + 1}/${numGames} (id=${game.id}) ===`);
     console.log(`# seed: ${game.seedDescription}`);
-    console.log(`# bonus plants: host=${game.bonusHost}, guest=${game.bonusGuest}\n`);
+    console.log(
+      `# bonus plants: host=${game.bonusHost}, guest=${game.bonusGuest}\n`
+    );
 
     for (const ln of game.notationLines) {
       console.log(ln);
