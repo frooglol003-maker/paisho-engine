@@ -25,6 +25,7 @@ import {
   EngineMove,
   pickBestMove,
   applyEngineMove,
+  positionKey, 
 } from "./engine";
 import { evaluate } from "./eval";
 import { applySetup, applyAction, loadGames, GameRecord } from "./parse";
@@ -312,9 +313,22 @@ function playSingleSelfPlayGame(
   const notationLines: string[] = [];
   const positions: Features[] = [];
 
+  // Threefold repetition detection
+  const seenPositions = new Map<string, number>();
+
   let ply = 1;
 
   while (ply <= maxPlies) {
+    // --- repetition check at start of ply ---
+    const key = positionKey(board, side);
+    const count = (seenPositions.get(key) ?? 0) + 1;
+    seenPositions.set(key, count);
+
+    if (count >= 3) {
+      // treat as draw; no further moves from here
+      notationLines.push(`; REPETITION DRAW after ply ${ply - 1}`);
+      break;
+    }
     const mv = pickBestMove(board, side, depth, {
       maxMs: opts.maxMsPerMove,
     });
@@ -343,6 +357,18 @@ function playSingleSelfPlayGame(
     side = side === "host" ? "guest" : "host";
     ply++;
   }
+  // --- check for ring victory after each full move ---
+    const rings = getRingOwners(board);
+    if (rings.host || rings.guest) {
+      if (rings.host && rings.guest) {
+        notationLines.push(`; DOUBLE-RING DRAW at ply ${ply - 1}`);
+      } else if (rings.host) {
+        notationLines.push(`; HOST RING WIN at ply ${ply - 1}`);
+      } else if (rings.guest) {
+        notationLines.push(`; GUEST RING WIN at ply ${ply - 1}`);
+      }
+      break;
+    }
 
   const finalScoreHost = evaluate(board, "host");
   const resHost = resultToScoreFromHost(finalScoreHost);
