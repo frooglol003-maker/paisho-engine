@@ -1,34 +1,32 @@
 // src/selfplay.ts
-// Engine self-play seeded from real games + notation output + learned weights.
+// Engine self-play from a fixed, standard-ish R3/W5 gate opening + notation output + learned weights.
 //
 // Usage (after build):
 //   npm run build
-//   node dist/selfplay.js --games 5 --depth 3 --maxMs 500 --seedPath data/sample_games.jsonl
+//   node dist/selfplay.js --games 5 --depth 3 --maxMs 500
 //
 // What it does:
-//   - Loads recorded games via parse.loadGames (same as learn.ts).
-//   - For each self-play run, picks a random game and random prefix of its moves,
-//     applies that prefix (using applySetup + applyAction) to get a mid-game position
-//     that obeys your actual rules.
-//   - From that position, lets the engine (Arrange + bonus) play against itself.
-//   - Prints the self-play part in Pai Sho–style notation to stdout.
-//   - Collects features for each self-play position and runs ridge regression
+//   - Builds a fixed opening position:
+//       * Host: R3 at (0, 8), W5 at (-8, 0)
+//       * Guest: R3 at (0, -8), W5 at (8, 0)
+//     (all on neutral midline gates, legal under current garden rules).
+//   - From that position, lets the engine play against itself.
+//   - Prints the self-play game in Pai Sho–style notation.
+//   - Collects features for each position and runs ridge regression
 //     to print a WEIGHTS block you can paste into eval.ts.
 
-import * as fs from "fs";
-import { Board, unpackPiece, TypeId } from "./board";
-import { coordsOf } from "./coords";
-import { buildHarmonyGraph, getRingOwners} from "./move";
+import { Board, TypeId, Owner, packPiece, unpackPiece } from "./board";
+import { coordsOf, indexOf } from "./coords";
+import { buildHarmonyGraph, getRingOwners } from "./move";
 import {
   generateLegalArrangeMoves,
   Side,
   EngineMove,
   pickBestMove,
   applyEngineMove,
-  boardKey,    
+  boardKey,
 } from "./engine";
 import { evaluate } from "./eval";
-import { applySetup, applyAction, loadGames, GameRecord } from "./parse";
 
 // For CLI entry detection
 declare const require: any;
@@ -260,6 +258,54 @@ function formatMoveNotation(ply: number, side: Side, mv: EngineMove): string {
   }
 }
 
+// ----------------- Fixed R3/W5 opening seed -----------------
+
+function idx1FromXY(x: number, y: number): number {
+  const i0 = indexOf(x, y);
+  if (i0 === -1) {
+    throw new Error(`idx1FromXY: off-board coord (${x},${y})`);
+  }
+  return i0 + 1;
+}
+
+/**
+ * Fixed, legal opening:
+ *   - Move 1 type: R3 on vertical gates
+ *       Host R3 at (0, 8), Guest R3 at (0, -8)
+ *   - Move 2 type: W5 on horizontal gates
+ *       Host W5 at (-8, 0), Guest W5 at (8, 0)
+ *
+ * This mimics:
+ *   1. planting R3s on the north/south gates,
+ *   2. planting W5s on the west/east gates.
+ *
+ * After this scripted opening, self-play begins with HOST to move.
+ */
+function setupFixedOpening(board: Board): void {
+  // Host R3 at north gate, guest R3 at south gate
+  board.setAtIndex(idx1FromXY(0, 8), packPiece(TypeId.R3, Owner.Host));
+  board.setAtIndex(idx1FromXY(0, -8), packPiece(TypeId.R3, Owner.Guest));
+
+  // Host W5 at west gate, guest W5 at east gate
+  board.setAtIndex(idx1FromXY(-8, 0), packPiece(TypeId.W5, Owner.Host));
+  board.setAtIndex(idx1FromXY(8, 0), packPiece(TypeId.W5, Owner.Guest));
+}
+
+function makeSeedPosition(): {
+  board: Board;
+  side: Side;
+  seedDescription: string;
+} {
+  const board = new Board();
+  setupFixedOpening(board);
+  // Opening is fully "planted"; we start actual play with host to move.
+  return {
+    board,
+    side: "host",
+    seedDescription: "fixed gate opening: R3 on (0,±8), W5 on (±8,0)",
+  };
+}
+
 // ----------------- Self-play core -----------------
 
 interface SelfPlayPositionSample {
@@ -269,114 +315,20 @@ interface SelfPlayPositionSample {
 
 interface SelfPlayGameRecord {
   id: string;
-  seedGameId?: string | number;
-  seedPrefix: number;
+  seedDescription: string;
   notationLines: string[];
   finalScoreHost: number;
 }
 
-function makeSeedFromGames(games: GameRecord[]): {
-  board: Board;
-  side: Side;
-  seedGame?: GameRecord;
-  seedPrefix: number;
-} {
-  // If no seed games at all, just start from an empty board.
-  if (!games || games.length === 0) {
-    return {
-      board: new Board(),
-      side: "host",
-      seedPrefix: 0,
-    };
-  }
-
-  const MAX_TRIES = 40;
-
-  for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
-    const g = games[Math.floor(Math.random() * games.length)];
-
-    // Prefer prefixes > 0 so we land in a middlegame-ish position.
-    const maxPrefix = g.moves.length;
-    if (maxPrefix === 0) {
-      // nothing to seed from here, try another game
-      continue;
-    }
-
-    // Choose a prefix between 1 and maxPrefix inclusive.
-    // (You can bump the lower bound to 3–4 if you want deeper openings.)
-    const prefix = 1 + Math.floor(Math.random() * maxPrefix);
-
-    let b = new Board();
-    applySetup(b, g.setup);
-    let side: Side = "host";
-
-    try {
-      for (let i = 0; i < prefix; i++) {
-        const action = g.moves[i];
-        b = applyAction(b, action);
-        side = side === "host" ? "guest" : "host";
-      }
-
-      // Now check whether this seed is actually a sensible starting point.
-
-      // 1) Skip positions where someone already has a ring.
-      const rings = getRingOwners(b);
-      if (rings.host || rings.guest) {
-        console.warn(
-          `Seed position from game ${g.id ?? "(no id)"} prefix ${prefix} already has a ring; skipping.`
-        );
-        continue;
-      }
-
-      // 2) Skip positions where either side has no legal arrange moves.
-      const hostMoves = generateLegalArrangeMoves(b, "host").length;
-      const guestMoves = generateLegalArrangeMoves(b, "guest").length;
-
-      if (hostMoves === 0 || guestMoves === 0) {
-        console.warn(
-          `Seed position from game ${g.id ?? "(no id)"} prefix ${prefix} has hostMoves=${hostMoves}, guestMoves=${guestMoves}; skipping.`
-        );
-        continue;
-      }
-
-      // Looks good: both sides have mobility, no ring yet.
-      return {
-        board: b,
-        side,
-        seedGame: g,
-        seedPrefix: prefix,
-      };
-    } catch (e: any) {
-      console.warn(
-        `Failed to seed from game ${g.id ?? "(no id)"} at prefix ${prefix}: ${
-          e?.message ?? e
-        }`
-      );
-      // Try another game on the next iteration.
-    }
-  }
-
-  // If all attempts failed (bad data or very strict filters), just start fresh.
-  console.warn(
-    "Seeding from sample_games.jsonl failed to find a good position; starting from empty board."
-  );
-  return {
-    board: new Board(),
-    side: "host",
-    seedPrefix: 0,
-  };
-}
-
 function playSingleSelfPlayGame(
   gameId: string,
-  games: GameRecord[],
   opts: { maxPlies?: number; depth?: number; maxMsPerMove?: number } = {}
 ): { game: SelfPlayGameRecord; samples: SelfPlayPositionSample[] } {
   const maxPlies = opts.maxPlies ?? 200;
   const depth = opts.depth ?? 3;
 
-  const { board: startBoard, side: startSide, seedGame, seedPrefix } =
-    makeSeedFromGames(games);
+  const { board: startBoard, side: startSide, seedDescription } =
+    makeSeedPosition();
 
   let board = startBoard;
   let side: Side = startSide;
@@ -404,7 +356,7 @@ function playSingleSelfPlayGame(
     });
 
     if (!mv) {
-      // no legal move for side-to-move → just stop; eval will decide label
+      // no legal move for side-to-move → stop; eval will decide label
       break;
     }
 
@@ -419,7 +371,7 @@ function playSingleSelfPlayGame(
     // Apply move
     board = applyEngineMove(board, side, mv);
 
-    // --- optional debug: how many moves does each side have now? ---
+    // --- optional debug: move counts after ply ---
     const hostMoves = generateLegalArrangeMoves(board, "host").length;
     const guestMoves = generateLegalArrangeMoves(board, "guest").length;
     console.log(
@@ -454,15 +406,13 @@ function playSingleSelfPlayGame(
 
   const game: SelfPlayGameRecord = {
     id: gameId,
-    seedGameId: (seedGame as any).id,
-    seedPrefix,
+    seedDescription,
     notationLines,
     finalScoreHost,
   };
 
   return { game, samples };
 }
-
 
 // ----------------- Batch + learning + CLI -----------------
 
@@ -490,29 +440,19 @@ async function main() {
   const depth = (args["depth"] as number) ?? 3;
   const maxMsPerMove = (args["maxMs"] as number) || undefined;
   const maxPlies = (args["maxPlies"] as number) ?? 200;
-  const seedPath = (args["seedPath"] as string) || "data/sample_games.jsonl";
 
   console.log(
     `Self-play: games=${numGames}, depth=${depth}, maxMsPerMove=${maxMsPerMove ?? "none"}, maxPlies=${maxPlies}`
   );
-  console.log(`Seeding from games in: ${seedPath}`);
-
-  if (!fs.existsSync(seedPath)) {
-    console.error(`Seed file not found: ${seedPath}`);
-    process.exit(1);
-  }
-
-  const games = await loadGames(seedPath);
-  if (games.length === 0) {
-    console.error("No games found in seed file.");
-    process.exit(1);
-  }
+  console.log(
+    "Starting each game from fixed R3/W5 gate opening (no seeding from sample_games.jsonl)."
+  );
 
   const allSamples: SelfPlayPositionSample[] = [];
 
   for (let g = 0; g < numGames; g++) {
     const gameId = `selfplay_${Date.now()}_${g}`;
-    const { game, samples } = playSingleSelfPlayGame(gameId, games, {
+    const { game, samples } = playSingleSelfPlayGame(gameId, {
       depth,
       maxMsPerMove,
       maxPlies,
@@ -521,11 +461,7 @@ async function main() {
     allSamples.push(...samples);
 
     console.log(`\n=== Game ${g + 1}/${numGames} (id=${game.id}) ===`);
-    console.log(
-      `# seeded from recorded game id=${String(
-        game.seedGameId ?? "?"
-      )} with prefix=${game.seedPrefix} moves\n`
-    );
+    console.log(`# seed: ${game.seedDescription}\n`);
     for (const ln of game.notationLines) {
       console.log(ln);
     }
