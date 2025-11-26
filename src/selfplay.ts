@@ -14,6 +14,8 @@
 //   - After each move, if the moving side created new harmonies,
 //     it automatically takes a HARMONY BONUS as a **plant** into an empty gate,
 //     respecting tile pools.
+//     • Bonus planting now prioritizes STANDARD FLOWERS that actually harmonize,
+//       so they can chain more bonuses.
 //   - The bonus plant is encoded as an accent in notation:  5H.(...)-(...)+TYPE(x,y)
 //   - Prints the self-play game in Pai Sho–style notation.
 //   - Collects features and runs ridge regression to print a WEIGHTS block.
@@ -23,7 +25,6 @@ import { coordsOf, indexOf } from "./coords";
 import {
   buildHarmonyGraph,
   getRingOwners,
-  listHarmonyEdges,
 } from "./move";
 import {
   generateLegalArrangeMoves,
@@ -269,11 +270,20 @@ function formatMoveNotation(ply: number, side: Side, mv: EngineMove): string {
   }
 }
 
-// ----------------- Harmony / bonus helpers -----------------
+// ----------------- Harmony helpers -----------------
 
 function harmonyEdgesForSide(board: Board, side: Side): number {
-  const edges = listHarmonyEdges(board) as { owner: "host" | "guest" }[];
-  return edges.filter((e) => e.owner === side).length;
+  const g = buildHarmonyGraph(board);
+  let total = 0;
+  for (const [idx, neighbors] of g) {
+    const p = board.getAtIndex(idx);
+    if (!p) continue;
+    const d = unpackPiece(p)!;
+    const s: Side = d.owner === Owner.Host ? "host" : "guest";
+    if (s !== side) continue;
+    total += neighbors.length;
+  }
+  return total;
 }
 
 // ----------------- Pool / bonus plant helpers -----------------
@@ -292,7 +302,7 @@ function idx1FromXY(x: number, y: number): number {
   return i0 + 1;
 }
 
-// Pool bookkeeping (mirrors play.ts, but minimal)
+// mapping from TypeId -> string key for the pool
 type CountMap = Record<string, number>;
 
 const PIECE_KEYS: [TypeId, string][] = [
@@ -306,6 +316,7 @@ const PIECE_KEYS: [TypeId, string][] = [
   [TypeId.Orchid, "Orchid"],
 ];
 
+// 3 of each standard flower, 1 Lotus, 1 Orchid
 const STANDARD_POOL: CountMap = {
   R3: 3,
   R4: 3,
@@ -316,6 +327,17 @@ const STANDARD_POOL: CountMap = {
   Lotus: 1,
   Orchid: 1,
 };
+
+const STANDARD_FLOWERS: TypeId[] = [
+  TypeId.R3,
+  TypeId.R4,
+  TypeId.R5,
+  TypeId.W3,
+  TypeId.W4,
+  TypeId.W5,
+];
+
+const SPECIAL_FLOWERS: TypeId[] = [TypeId.Lotus, TypeId.Orchid];
 
 function keyForType(t: TypeId): string | undefined {
   const pair = PIECE_KEYS.find(([tid]) => tid === t);
@@ -392,12 +414,98 @@ type BonusPlantInfo = {
   y: number;
 };
 
+function ownerOfSide(side: Side): Owner {
+  return side === "host" ? Owner.Host : Owner.Guest;
+}
+
+/**
+ * Given a hypothetical plant (type + gate idx1), return how many
+ * harmonies that **new piece** participates in after planting.
+ */
+function harmonyFromNewPlant(
+  board: Board,
+  side: Side,
+  type: TypeId,
+  gateIdx1: number
+): number {
+  if (board.getAtIndex(gateIdx1) !== 0) return -Infinity;
+
+  const clone = board.clone();
+  const owner = ownerOfSide(side);
+  clone.setAtIndex(gateIdx1, packPiece(type, owner));
+
+  const g = buildHarmonyGraph(clone);
+  const neighbors = g.get(gateIdx1);
+  return neighbors ? neighbors.length : 0;
+}
+
+/**
+ * Choose the best bonus plant (type + gate) for a side:
+ *   1) Consider STANDARD_FLOWERS that the pool still has.
+ *      For each empty gate, simulate placing that flower and
+ *      count how many harmonies the new piece gets.
+ *      Take the (type, gate) with highest harmony count.
+ *      If bestScore > 0, use that.
+ *   2) If no standard flower yields any harmony, repeat the process
+ *      for SPECIAL_FLOWERS (Lotus/Orchid). We allow them even with 0
+ *      new harmonies, as a fallback.
+ */
+function pickBonusPlant(
+  board: Board,
+  side: Side
+): { type: TypeId; gate: { x: number; y: number }; typeName: string } | null {
+  const rem = remainingFromBoard(board);
+  const pool = side === "host" ? rem.host : rem.guest;
+
+  // Higher-level helper to scan over a set of piece types
+  const scanTypes = (types: TypeId[]): {
+    type: TypeId | null;
+    gate: { x: number; y: number } | null;
+    score: number;
+  } => {
+    let bestType: TypeId | null = null;
+    let bestGate: { x: number; y: number } | null = null;
+    let bestScore = -Infinity;
+
+    for (const t of types) {
+      const key = keyForType(t)!;
+      if ((pool[key] ?? 0) <= 0) continue; // none left in pool
+
+      for (const g of GATES) {
+        const idx = idx1FromXY(g.x, g.y);
+        if (board.getAtIndex(idx) !== 0) continue; // gate must be empty
+
+        const s = harmonyFromNewPlant(board, side, t, idx);
+        if (s > bestScore) {
+          bestScore = s;
+          bestType = t;
+          bestGate = g;
+        }
+      }
+    }
+
+    return { type: bestType, gate: bestGate, score: bestScore };
+  };
+
+  // 1) Try standard flowers first, require >0 harmonies.
+  const stdRes = scanTypes(STANDARD_FLOWERS);
+  if (stdRes.type && stdRes.gate && stdRes.score > 0) {
+    const name = keyForType(stdRes.type)!;
+    return { type: stdRes.type, gate: stdRes.gate, typeName: name };
+  }
+
+  // 2) Fallback: specials, even if they don't create new harmonies.
+  const spRes = scanTypes(SPECIAL_FLOWERS);
+  if (spRes.type && spRes.gate) {
+    const name = keyForType(spRes.type)!;
+    return { type: spRes.type, gate: spRes.gate, typeName: name };
+  }
+
+  return null;
+}
+
 /**
  * Try to apply a single bonus PLANT for `side`.
- * - Only flowers + Lotus/Orchid are used.
- * - Respects per-side pools.
- * - Only allowed if playerCanPlant and there is an empty gate.
- *
  * Returns info for notation if a plant was done; otherwise null.
  */
 function tryApplyBonusPlant(board: Board, side: Side): BonusPlantInfo | null {
@@ -405,74 +513,20 @@ function tryApplyBonusPlant(board: Board, side: Side): BonusPlantInfo | null {
     return null;
   }
 
-  const rem = remainingFromBoard(board);
-  const pool = side === "host" ? rem.host : rem.guest;
-  const owner = side === "host" ? Owner.Host : Owner.Guest;
+  const choice = pickBonusPlant(board, side);
+  if (!choice) return null;
 
-  // Prefer higher-value material: Lotus > Orchid > 5s > 4s > 3s
-  const ORDER: { key: keyof CountMap; type: TypeId }[] = [
-    { key: "Lotus", type: TypeId.Lotus },
-    { key: "Orchid", type: TypeId.Orchid },
-    { key: "R5", type: TypeId.R5 },
-    { key: "W5", type: TypeId.W5 },
-    { key: "R4", type: TypeId.R4 },
-    { key: "W4", type: TypeId.W4 },
-    { key: "R3", type: TypeId.R3 },
-    { key: "W3", type: TypeId.W3 },
-  ];
+  const { type, gate, typeName } = choice;
+  const idx = idx1FromXY(gate.x, gate.y);
+  const owner = ownerOfSide(side);
 
-  let chosenType: TypeId | null = null;
-  let chosenKey: string | null = null;
-
-  for (const opt of ORDER) {
-    if ((pool[opt.key] ?? 0) > 0) {
-      chosenType = opt.type;
-      chosenKey = opt.key;
-      break;
-    }
-  }
-
-  if (!chosenType || !chosenKey) {
-    return null; // nothing left to plant
-  }
-
-  // Choose a gate: prefer "home" gate, else any empty.
-  const preferredOrder =
-    side === "host"
-      ? [
-          { x: 0, y: 8 }, // north
-          { x: -8, y: 0 },
-          { x: 8, y: 0 },
-          { x: 0, y: -8 },
-        ]
-      : [
-          { x: 0, y: -8 }, // south
-          { x: -8, y: 0 },
-          { x: 8, y: 0 },
-          { x: 0, y: 8 },
-        ];
-
-  let gatePos: { x: number; y: number } | null = null;
-  for (const g of preferredOrder) {
-    const idx = idx1FromXY(g.x, g.y);
-    if (!board.getAtIndex(idx)) {
-      gatePos = g;
-      break;
-    }
-  }
-
-  if (!gatePos) {
-    return null;
-  }
-
-  const idx = idx1FromXY(gatePos.x, gatePos.y);
-  board.setAtIndex(idx, packPiece(chosenType, owner));
+  board.setAtIndex(idx, packPiece(type, owner));
 
   console.log(
-    `BONUS: ${side} plants ${chosenKey} at (${gatePos.x},${gatePos.y})`
+    `BONUS: ${side} plants ${typeName} at (${gate.x},${gate.y})`
   );
 
-  return { typeName: chosenKey, x: gatePos.x, y: gatePos.y };
+  return { typeName, x: gate.x, y: gate.y };
 }
 
 // ----------------- Fixed R3/W5 opening seed -----------------
@@ -594,7 +648,7 @@ function playSingleSelfPlayGame(
     let bonusSuffix = "";
 
     if (edgesAfter > edgesBefore) {
-      // Harmony bonus: always try PLANT (never accent) to gain material.
+      // Harmony bonus: always try PLANT to gain material.
       const bonus = tryApplyBonusPlant(board, side);
       if (bonus) {
         bonusSuffix = `+${bonus.typeName}(${bonus.x},${bonus.y})`;
@@ -606,14 +660,12 @@ function playSingleSelfPlayGame(
     // --- ring check AFTER bonuses ---
     const rings = getRingOwners(board);
     if (rings.host || rings.guest) {
+      notationLines.push(`${mainNotation}${bonusSuffix}`);
       if (rings.host && rings.guest) {
-        notationLines.push(`${mainNotation}${bonusSuffix}`);
         notationLines.push(`; DOUBLE-RING DRAW at ply ${ply}`);
       } else if (rings.host) {
-        notationLines.push(`${mainNotation}${bonusSuffix}`);
         notationLines.push(`; HOST RING WIN at ply ${ply}`);
       } else {
-        notationLines.push(`${mainNotation}${bonusSuffix}`);
         notationLines.push(`; GUEST RING WIN at ply ${ply}`);
       }
       break;
