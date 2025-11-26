@@ -18,14 +18,14 @@
 import * as fs from "fs";
 import { Board, unpackPiece, TypeId } from "./board";
 import { coordsOf } from "./coords";
-import { buildHarmonyGraph } from "./move";
+import { buildHarmonyGraph, getRingOwners} from "./move";
 import {
   generateLegalArrangeMoves,
   Side,
   EngineMove,
   pickBestMove,
   applyEngineMove,
-  positionKey, 
+  boardKey,    
 } from "./engine";
 import { evaluate } from "./eval";
 import { applySetup, applyAction, loadGames, GameRecord } from "./parse";
@@ -313,62 +313,66 @@ function playSingleSelfPlayGame(
   const notationLines: string[] = [];
   const positions: Features[] = [];
 
-  // Threefold repetition detection
+  // For threefold repetition detection
   const seenPositions = new Map<string, number>();
 
   let ply = 1;
 
   while (ply <= maxPlies) {
     // --- repetition check at start of ply ---
-    const key = positionKey(board, side);
+    const key = boardKey(board, side);
     const count = (seenPositions.get(key) ?? 0) + 1;
     seenPositions.set(key, count);
 
     if (count >= 3) {
-      // treat as draw; no further moves from here
       notationLines.push(`; REPETITION DRAW after ply ${ply - 1}`);
       break;
     }
+
     const mv = pickBestMove(board, side, depth, {
       maxMs: opts.maxMsPerMove,
     });
 
-    if (!mv) break;
+    if (!mv) {
+      // no legal move for side-to-move → just stop; eval will decide label
+      break;
+    }
 
     // Record features BEFORE the move
     const f = extractFeatures(board);
     positions.push(f);
 
-    // Notation
+    // Notation line
     const line = formatMoveNotation(ply, side, mv);
     notationLines.push(line);
 
     // Apply move
     board = applyEngineMove(board, side, mv);
 
-    // DEBUG: how many moves does the *next* side have?
-  const hostMoves = generateLegalArrangeMoves(board, "host").length;
-  const guestMoves = generateLegalArrangeMoves(board, "guest").length;
-  console.log(
-    `DEBUG after ply ${ply}: hostMoves=${hostMoves}, guestMoves=${guestMoves}`
-  );
+    // --- optional debug: how many moves does each side have now? ---
+    const hostMoves = generateLegalArrangeMoves(board, "host").length;
+    const guestMoves = generateLegalArrangeMoves(board, "guest").length;
+    console.log(
+      `DEBUG after ply ${ply}: hostMoves=${hostMoves}, guestMoves=${guestMoves}`
+    );
 
-    
-    side = side === "host" ? "guest" : "host";
-    ply++;
-  }
-  // --- check for ring victory after each full move ---
+    // --- ring check after move ---
     const rings = getRingOwners(board);
     if (rings.host || rings.guest) {
       if (rings.host && rings.guest) {
-        notationLines.push(`; DOUBLE-RING DRAW at ply ${ply - 1}`);
+        notationLines.push(`; DOUBLE-RING DRAW at ply ${ply}`);
       } else if (rings.host) {
-        notationLines.push(`; HOST RING WIN at ply ${ply - 1}`);
-      } else if (rings.guest) {
-        notationLines.push(`; GUEST RING WIN at ply ${ply - 1}`);
+        notationLines.push(`; HOST RING WIN at ply ${ply}`);
+      } else {
+        notationLines.push(`; GUEST RING WIN at ply ${ply}`);
       }
       break;
     }
+
+    // Next side
+    side = side === "host" ? "guest" : "host";
+    ply++;
+  }
 
   const finalScoreHost = evaluate(board, "host");
   const resHost = resultToScoreFromHost(finalScoreHost);
@@ -388,6 +392,7 @@ function playSingleSelfPlayGame(
 
   return { game, samples };
 }
+
 
 // ----------------- Batch + learning + CLI -----------------
 
