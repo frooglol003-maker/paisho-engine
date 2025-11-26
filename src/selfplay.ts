@@ -275,26 +275,67 @@ interface SelfPlayGameRecord {
   finalScoreHost: number;
 }
 
-function makeSeedFromGames(
-  games: GameRecord[]
-): { board: Board; side: Side; seedGame: GameRecord; seedPrefix: number } {
-  const gi = Math.floor(Math.random() * games.length);
-  const seedGame = games[gi];
-
-  let board = new Board();
-  applySetup(board, seedGame.setup);
-
-  let side: Side = "host";
-  const maxPrefix = seedGame.moves.length;
-  const seedPrefix = maxPrefix === 0 ? 0 : Math.floor(Math.random() * (maxPrefix + 1));
-
-  for (let i = 0; i < seedPrefix; i++) {
-    const action = seedGame.moves[i];
-    board = applyAction(board, action);
-    side = side === "host" ? "guest" : "host";
+function makeSeedFromGames(games: GameRecord[]): {
+  board: Board;
+  side: Side;
+  seedGame?: GameRecord;
+  seedPrefix: number;
+} {
+  // If no seed games at all, just start from an empty board.
+  if (!games || games.length === 0) {
+    return {
+      board: new Board(),
+      side: "host",
+      seedPrefix: 0,
+    };
   }
 
-  return { board, side, seedGame, seedPrefix };
+  const MAX_TRIES = 20;
+
+  for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
+    const g = games[Math.floor(Math.random() * games.length)];
+    const maxPrefix = g.moves.length;
+    const prefix =
+      maxPrefix === 0 ? 0 : Math.floor(Math.random() * (maxPrefix + 1));
+
+    let b = new Board();
+    applySetup(b, g.setup);
+    let side: Side = "host";
+
+    try {
+      for (let i = 0; i < prefix; i++) {
+        const action = g.moves[i];
+        // applyAction returns a new Board (same pattern as in learn.ts)
+        b = applyAction(b, action);
+        side = side === "host" ? "guest" : "host";
+      }
+
+      // If we got here, this game+prefix is legal under current rules.
+      return {
+        board: b,
+        side,
+        seedGame: g,
+        seedPrefix: prefix,
+      };
+    } catch (e: any) {
+      console.warn(
+        `Failed to seed from game ${g.id ?? "(no id)"} at prefix ${prefix}: ${
+          e?.message ?? e
+        }`
+      );
+      // try another game on the next loop iteration
+    }
+  }
+
+  // If all attempts failed (old data doesn’t match new rules), just start fresh.
+  console.warn(
+    "Seeding from sample_games.jsonl failed repeatedly; starting from empty board."
+  );
+  return {
+    board: new Board(),
+    side: "host",
+    seedPrefix: 0,
+  };
 }
 
 function playSingleSelfPlayGame(
