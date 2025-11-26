@@ -98,7 +98,7 @@ function TT_set(key: string, val: TTEntry) {
 export const searchStats = { nodes: 0, ttHits: 0, cutoffs: 0 };
 
 // Zobrist-based position key
-function boardKey(board: Board, side: Side): string {
+export function boardKey(board: Board, side: Side): string {
   const N: number = (board as any).size1Based ?? 249;
   let h: [number, number] = [0, 0];
   for (let i = 1; i <= N; i++) {
