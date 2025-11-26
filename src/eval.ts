@@ -7,7 +7,7 @@ import { buildHarmonyGraph } from "./move";
 
 type Pov = "host" | "guest";
 
-// --- Material values (can be re-tuned later) ---
+// --- Material values ---
 const MATERIAL: Record<TypeId, number> = {
   [TypeId.Empty]: 0 as any, // keep or drop depending on your enum
   [TypeId.R3]: 3,
@@ -32,7 +32,8 @@ function pieceValue(t: TypeId): number {
 
 function material(board: Board): { host: number; guest: number } {
   const N = (board as any).size1Based ?? 249;
-  let host = 0, guest = 0;
+  let host = 0,
+    guest = 0;
   for (let i = 1; i <= N; i++) {
     const p = board.getAtIndex(i);
     if (!p) continue;
@@ -45,9 +46,14 @@ function material(board: Board): { host: number; guest: number } {
 }
 
 // Raw piece counts (ignores type)
-function pieceCount(board: Board): { host: number; guest: number; total: number } {
+function pieceCount(board: Board): {
+  host: number;
+  guest: number;
+  total: number;
+} {
   const N = (board as any).size1Based ?? 249;
-  let host = 0, guest = 0;
+  let host = 0,
+    guest = 0;
   for (let i = 1; i <= N; i++) {
     const p = board.getAtIndex(i);
     if (!p) continue;
@@ -61,7 +67,8 @@ function pieceCount(board: Board): { host: number; guest: number; total: number 
 // Harmony degree = sum of harmony edges touching each piece
 function harmonyDeg(board: Board): { host: number; guest: number } {
   const g = buildHarmonyGraph(board);
-  let host = 0, guest = 0;
+  let host = 0,
+    guest = 0;
   for (const [node, neighbors] of g) {
     const p = board.getAtIndex(node);
     if (!p) continue;
@@ -75,7 +82,8 @@ function harmonyDeg(board: Board): { host: number; guest: number } {
 // "Development" = central presence
 function centerCount(board: Board): { host: number; guest: number } {
   const N = (board as any).size1Based ?? 249;
-  let host = 0, guest = 0;
+  let host = 0,
+    guest = 0;
   for (let i = 1; i <= N; i++) {
     const p = board.getAtIndex(i);
     if (!p) continue;
@@ -99,27 +107,28 @@ function gamePhase(board: Board): number {
 
 // --- Feature vector type ---
 interface Features {
-  materialDiff:   number; // host - guest (weighted by MATERIAL)
+  materialDiff: number;   // host - guest (weighted by MATERIAL)
   pieceCountDiff: number; // hostPieces - guestPieces
   harmonyDegDiff: number; // sum of harmony edges
-  centerDiff:     number; // central presence
+  centerDiff: number;     // central presence
 }
 
 // --- Weight sets: opening vs endgame ---
-// Opening (phase ~0): push planting + harmonies + development.
-// Endgame (phase ~1): harmonies + material dominate.
+// Opening (phase ~0): learned from self-play (material / harmony / center).
+// Endgame (phase ~1): hand-tuned, ring-focused.
 const OPENING_WEIGHTS: Features = {
+  // From self-play (98 samples); pieceCountDiff left neutral for now.
   materialDiff: 0.135090,
+  pieceCountDiff: 0.0,
   harmonyDegDiff: -0.120804,
   centerDiff: -0.212725,
-  mobilityDiff: -0.000034
 };
 
 const ENDGAME_WEIGHTS: Features = {
-  materialDiff:   1.8,
+  materialDiff: 1.8,
   pieceCountDiff: 0.7,
   harmonyDegDiff: 3.2,
-  centerDiff:     0.4,
+  centerDiff: 0.4,
 };
 
 function lerp(a: number, b: number, t: number): number {
@@ -128,10 +137,26 @@ function lerp(a: number, b: number, t: number): number {
 
 function blendedWeights(phase: number): Features {
   return {
-    materialDiff:   lerp(OPENING_WEIGHTS.materialDiff,   ENDGAME_WEIGHTS.materialDiff,   phase),
-    pieceCountDiff: lerp(OPENING_WEIGHTS.pieceCountDiff, ENDGAME_WEIGHTS.pieceCountDiff, phase),
-    harmonyDegDiff: lerp(OPENING_WEIGHTS.harmonyDegDiff, ENDGAME_WEIGHTS.harmonyDegDiff, phase),
-    centerDiff:     lerp(OPENING_WEIGHTS.centerDiff,     ENDGAME_WEIGHTS.centerDiff,     phase),
+    materialDiff: lerp(
+      OPENING_WEIGHTS.materialDiff,
+      ENDGAME_WEIGHTS.materialDiff,
+      phase
+    ),
+    pieceCountDiff: lerp(
+      OPENING_WEIGHTS.pieceCountDiff,
+      ENDGAME_WEIGHTS.pieceCountDiff,
+      phase
+    ),
+    harmonyDegDiff: lerp(
+      OPENING_WEIGHTS.harmonyDegDiff,
+      ENDGAME_WEIGHTS.harmonyDegDiff,
+      phase
+    ),
+    centerDiff: lerp(
+      OPENING_WEIGHTS.centerDiff,
+      ENDGAME_WEIGHTS.centerDiff,
+      phase
+    ),
   };
 }
 
@@ -139,84 +164,28 @@ function blendedWeights(phase: number): Features {
  * Evaluate from POV: positive = good for pov.
  * We compute (host - guest) with features, then flip by pov.
  */
-export function evaluate(board: Board, pov: "host" | "guest"): number {
-  const m = (function material(board) {
-    const N = board.size1Based ?? 249;
-    let host = 0, guest = 0;
-    for (let i = 1; i <= N; i++) {
-        const p = board.getAtIndex(i);
-        if (!p)
-            continue;
-        const d = (0, board_1.unpackPiece)(p);
-        const val = d.type === board_1.TypeId.R3 || d.type === board_1.TypeId.W3
-            ? 3
-            : d.type === board_1.TypeId.R4 || d.type === board_1.TypeId.W4
-                ? 4
-                : d.type === board_1.TypeId.R5 || d.type === board_1.TypeId.W5
-                    ? 5
-                    : d.type === board_1.TypeId.Lotus
-                        ? 7
-                        : d.type === board_1.TypeId.Orchid
-                            ? 6
-                            : 0;
-        if (d.owner === board_1.Owner.Host)
-            host += val;
-        else
-            guest += val;
-    }
-    return { host, guest };
-})(board);
-  const h = (function harmonyDeg(board) {
-    const g = (0, move_1.buildHarmonyGraph)(board);
-    let host = 0, guest = 0;
-    for (const [node, neighbors] of g) {
-        const p = board.getAtIndex(node);
-        if (!p)
-            continue;
-        const d = (0, board_1.unpackPiece)(p);
-        if (d.owner === board_1.Owner.Host)
-            host += neighbors.length;
-        else
-            guest += neighbors.length;
-    }
-    return { host, guest };
-})(board);
-  const c = (function centerCount(board) {
-    const N = board.size1Based ?? 249;
-    let host = 0, guest = 0;
-    for (let i = 1; i <= N; i++) {
-        const p = board.getAtIndex(i);
-        if (!p)
-            continue;
-        const d = (0, board_1.unpackPiece)(p);
-        const { x, y } = (0, coords_1.coordsOf)(i - 1);
-        const isCenter = Math.abs(x) + Math.abs(y) <= 3;
-        if (!isCenter)
-            continue;
-        if (d.owner === board_1.Owner.Host)
-            host++;
-        else
-            guest++;
-    }
-    return { host, guest };
-})(board);
-  const mo = (function mobility(board) {
-    const hostMoves = (0, engine_1.generateLegalArrangeMoves)(board, "host").length;
-    const guestMoves = (0, engine_1.generateLegalArrangeMoves)(board, "guest").length;
-    return { host: hostMoves, guest: guestMoves };
-})(board);
+export function evaluate(board: Board, pov: Pov): number {
+  const mat = material(board);
+  const pc = pieceCount(board);
+  const har = harmonyDeg(board);
+  const cen = centerCount(board);
+
   const f = {
-    materialDiff: m.host - m.guest,
-    harmonyDegDiff: h.host - h.guest,
-    centerDiff: c.host - c.guest,
-    mobilityDiff: mo.host - mo.guest,
+    materialDiff: mat.host - mat.guest,
+    pieceCountDiff: pc.host - pc.guest,
+    harmonyDegDiff: har.host - har.guest,
+    centerDiff: cen.host - cen.guest,
   };
 
-  const raw =
-    WEIGHTS.materialDiff * f.materialDiff +
-    WEIGHTS.harmonyDegDiff * f.harmonyDegDiff +
-    WEIGHTS.centerDiff   * f.centerDiff +
-    WEIGHTS.mobilityDiff * f.mobilityDiff;
+  const phase = gamePhase(board);
+  const W = blendedWeights(phase);
 
-  return pov === "host" ? raw : -raw;
+  const raw =
+    W.materialDiff * f.materialDiff +
+    W.pieceCountDiff * f.pieceCountDiff +
+    W.harmonyDegDiff * f.harmonyDegDiff +
+    W.centerDiff * f.centerDiff;
+
+  const score = pov === "host" ? raw : -raw;
+  return score;
 }
