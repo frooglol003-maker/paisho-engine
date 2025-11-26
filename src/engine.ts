@@ -1,5 +1,6 @@
 // src/engine.ts
-// Multi-step Arrange move gen + fast alpha–beta search + Harmony Bonus generators.
+// Multi-step Arrange move gen + fast alpha–beta search + Harmony Bonus generators,
+// with ring wins as primary and alt-win (cross-midline harmony) as secondary.
 
 import { performance } from "perf_hooks";
 import { coordsOf, NEIGHBORS4_1, NEIGHBORS8_1 } from "./coords";
@@ -10,12 +11,17 @@ import {
   planBoatOnFlower,
   planBoatOnAccent,
 } from "./rules";
-import { validateArrange, detectAnyClash } from "./move";
+import {
+  validateArrange,
+  detectAnyClash,
+  buildHarmonyGraph,
+  getRingOwners,
+} from "./move";
 import { evaluate } from "./eval";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
 import { Z_PIECE, Z_SIDE, xor64, key64 } from "./zobrist";
 
-// ---------- Types ----------
+// ---------- Basic types ----------
 export type Side = "host" | "guest";
 
 // Arrange move: a path of 1-based indices from a source
@@ -36,7 +42,7 @@ type BoatAccent = { kind: "boatAccent"; boat: number; target: number };
 // Public move type (exported for external use, e.g. self-play / UI)
 export type EngineMove = ArrangeMove | WheelMove | BoatFlower | BoatAccent;
 
-// Internal alias for clarity
+// Internal alias
 type AnyMove = EngineMove;
 
 // ---------- Helpers ----------
@@ -44,17 +50,21 @@ function opposite(s: Side): Side {
   return s === "host" ? "guest" : "host";
 }
 
+function sideToOwner(side: Side): Owner {
+  return side === "host" ? Owner.Host : Owner.Guest;
+}
+
 function belongsTo(packed: number | null, side: Side): boolean {
   if (!packed) return false;
   const dec = unpackPiece(packed)!;
-  return side === "host" ? dec.owner === 0 : dec.owner === 1;
+  return side === "host" ? dec.owner === Owner.Host : dec.owner === Owner.Guest;
 }
 
 function owns(board: Board, idx1: number, side: Side): boolean {
   const p = board.getAtIndex(idx1);
   if (!p) return false;
   const d = unpackPiece(p)!;
-  return side === "host" ? d.owner === 0 : d.owner === 1;
+  return side === "host" ? d.owner === Owner.Host : d.owner === Owner.Guest;
 }
 
 function isType(board: Board, idx1: number, t: TypeId): boolean {
@@ -68,36 +78,18 @@ function other(side: Side): Side {
   return side === "host" ? "guest" : "host";
 }
 
-// ---------- Search core (alpha–beta + ordering + TT + time limit) ----------
-type Score = number;
-type TTFlag = "EXACT" | "LOWER" | "UPPER";
-
-interface TTEntry {
-  depth: number; // remaining depth when stored
-  score: Score; // score from side-to-move POV when stored
-  flag: TTFlag;
-  best?: AnyMove;
+function isStandardFlower(t: TypeId): boolean {
+  return (
+    t === TypeId.R3 ||
+    t === TypeId.R4 ||
+    t === TypeId.R5 ||
+    t === TypeId.W3 ||
+    t === TypeId.W4 ||
+    t === TypeId.W5
+  );
 }
 
-const TT = new Map<string, TTEntry>();
-const TT_CAP = 200_000;
-
-function TT_set(key: string, val: TTEntry) {
-  if (TT.size >= TT_CAP) {
-    // simple aging: drop ~1/8 of entries
-    let n = Math.floor(TT_CAP / 8);
-    for (const k of TT.keys()) {
-      TT.delete(k);
-      if (--n <= 0) break;
-    }
-  }
-  TT.set(key, val);
-}
-
-// stats (for demo / debugging)
-export const searchStats = { nodes: 0, ttHits: 0, cutoffs: 0 };
-
-// Zobrist-based position key
+// ---------- Zobrist-based position key ----------
 export function boardKey(board: Board, side: Side): string {
   const N: number = (board as any).size1Based ?? 249;
   let h: [number, number] = [0, 0];
@@ -108,44 +100,20 @@ export function boardKey(board: Board, side: Side): string {
     const type = (p & 0x0f) as TypeId;
     const owner = ((p >> 4) & 0x01) ? Owner.Guest : Owner.Host;
 
-    let tIdx = 0;
+    let tIdx = -1;
     switch (type) {
-      case TypeId.R3:
-        tIdx = 0;
-        break;
-      case TypeId.R4:
-        tIdx = 1;
-        break;
-      case TypeId.R5:
-        tIdx = 2;
-        break;
-      case TypeId.W3:
-        tIdx = 3;
-        break;
-      case TypeId.W4:
-        tIdx = 4;
-        break;
-      case TypeId.W5:
-        tIdx = 5;
-        break;
-      case TypeId.Lotus:
-        tIdx = 6;
-        break;
-      case TypeId.Orchid:
-        tIdx = 7;
-        break;
-      case TypeId.Rock:
-        tIdx = 8;
-        break;
-      case TypeId.Wheel:
-        tIdx = 9;
-        break;
-      case TypeId.Boat:
-        tIdx = 10;
-        break;
-      case TypeId.Knotweed:
-        tIdx = 11;
-        break;
+      case TypeId.R3: tIdx = 0; break;
+      case TypeId.R4: tIdx = 1; break;
+      case TypeId.R5: tIdx = 2; break;
+      case TypeId.W3: tIdx = 3; break;
+      case TypeId.W4: tIdx = 4; break;
+      case TypeId.W5: tIdx = 5; break;
+      case TypeId.Lotus: tIdx = 6; break;
+      case TypeId.Orchid: tIdx = 7; break;
+      case TypeId.Rock: tIdx = 8; break;
+      case TypeId.Wheel: tIdx = 9; break;
+      case TypeId.Boat: tIdx = 10; break;
+      case TypeId.Knotweed: tIdx = 11; break;
       default:
         continue; // Empty / unknown
     }
@@ -171,7 +139,6 @@ export function applyPlannedArrange(board: Board, mv: PlannedArrange): Board {
 }
 
 // Make move on a cloned board and return it.
-// Uses existing apply* helpers so we keep one source of truth.
 function applyMoveCloned(board: Board, side: Side, mv: AnyMove): Board {
   switch (mv.kind) {
     case "arrange":
@@ -190,6 +157,139 @@ export function applyEngineMove(board: Board, side: Side, mv: EngineMove): Board
   return applyMoveCloned(board, side, mv);
 }
 
+// ---------- Terminal scoring: ring win + alt-win ----------
+
+const RING_WIN_SCORE = 10_000;
+const ALT_WIN_SCORE  = 5_000;
+
+/**
+ * Count how many standard flowers a given owner has on the board.
+ * (We don't track reserves explicitly, so we use "on-board standard flowers"
+ *  as the proxy for "still has flowers".)
+ */
+function countStandardFlowersOnBoard(board: Board, owner: Owner): number {
+  const N = (board as any).size1Based ?? 249;
+  let count = 0;
+  for (let i = 1; i <= N; i++) {
+    const p = board.getAtIndex(i);
+    if (!p) continue;
+    const d = unpackPiece(p)!;
+    if (d.owner !== owner) continue;
+    if (isStandardFlower(d.type)) count++;
+  }
+  return count;
+}
+
+/**
+ * Cross-midline harmony score:
+ *  - Uses buildHarmonyGraph(board)
+ *  - Only counts edges between same-owner pieces that lie on opposite sides of
+ *    the horizontal midline y = 0.
+ *  - Each adjacency contributes 1; double-counting is fine since it's symmetric
+ *    between players.
+ */
+function crossMidlineHarmonyScore(board: Board, owner: Owner): number {
+  const g = buildHarmonyGraph(board);
+  let score = 0;
+
+  for (const [idx, neighbors] of g) {
+    const p = board.getAtIndex(idx);
+    if (!p) continue;
+    const d = unpackPiece(p)!;
+    if (d.owner !== owner) continue;
+
+    const { x: x1, y: y1 } = coordsOf(idx - 1);
+    const side1 = Math.sign(y1); // -1, 0, or 1
+
+    for (const n of neighbors) {
+      const q = board.getAtIndex(n);
+      if (!q) continue;
+      const d2 = unpackPiece(q)!;
+      if (d2.owner !== owner) continue;
+
+      const { x: x2, y: y2 } = coordsOf(n - 1);
+      const side2 = Math.sign(y2);
+
+      // Require opposite sides of the horizontal midline (ignore exactly-on-midline)
+      if (side1 === 0 || side2 === 0) continue;
+      if (side1 * side2 === -1) {
+        score++;
+      }
+    }
+  }
+
+  return score;
+}
+
+/**
+ * Terminal scoring from the POV of `pov`.
+ * - Returns null if position is non-terminal.
+ * - Otherwise returns a large-magnitude score encoding:
+ *      ring win  >  alt-win  >  draw
+ */
+function terminalScore(board: Board, pov: Side): number | null {
+  const rings = getRingOwners(board); // assumed shape: { host: boolean; guest: boolean }
+
+  // 1) Ring win takes absolute precedence
+  if (rings.host || rings.guest) {
+    if (rings.host && rings.guest) {
+      // extremely unlikely but well-defined: both made a ring → draw
+      return 0;
+    }
+    const winner: Side = rings.host ? "host" : "guest";
+    return winner === pov ? +RING_WIN_SCORE : -RING_WIN_SCORE;
+  }
+
+  // 2) Alt win: when at least one party has no standard flowers on the board
+  const hostFlowers = countStandardFlowersOnBoard(board, Owner.Host);
+  const guestFlowers = countStandardFlowersOnBoard(board, Owner.Guest);
+
+  if (hostFlowers === 0 || guestFlowers === 0) {
+    const hostScore = crossMidlineHarmonyScore(board, Owner.Host);
+    const guestScore = crossMidlineHarmonyScore(board, Owner.Guest);
+
+    if (hostScore === guestScore) {
+      return 0; // alt-win draw
+    }
+
+    const winner: Side = hostScore > guestScore ? "host" : "guest";
+    return winner === pov ? +ALT_WIN_SCORE : -ALT_WIN_SCORE;
+  }
+
+  // Non-terminal
+  return null;
+}
+
+// ---------- Search core (alpha–beta + ordering + TT + time limit) ----------
+
+type Score = number;
+type TTFlag = "EXACT" | "LOWER" | "UPPER";
+
+interface TTEntry {
+  depth: number; // remaining depth when stored
+  score: Score;  // score from side-to-move POV when stored
+  flag: TTFlag;
+  best?: AnyMove;
+}
+
+const TT = new Map<string, TTEntry>();
+const TT_CAP = 200_000;
+
+function TT_set(key: string, val: TTEntry) {
+  if (TT.size >= TT_CAP) {
+    // simple aging: drop ~1/8 of entries
+    let n = Math.floor(TT_CAP / 8);
+    for (const k of TT.keys()) {
+      TT.delete(k);
+      if (--n <= 0) break;
+    }
+  }
+  TT.set(key, val);
+}
+
+// stats (for demo / debugging)
+export const searchStats = { nodes: 0, ttHits: 0, cutoffs: 0 };
+
 // --- killer moves + history (declare AFTER AnyMove is defined) ---
 const MAX_PLY = 128;
 const killers: (AnyMove | null)[][] = Array.from({ length: MAX_PLY }, () => [
@@ -205,7 +305,7 @@ function histKey(mv: AnyMove) {
 function generateAllMoves(board: Board, side: Side): AnyMove[] {
   const moves: AnyMove[] = [];
 
-  // Arrange
+  // Arrange moves
   for (const m of generateLegalArrangeMoves(board, side)) {
     moves.push({ kind: "arrange", from: m.from, path: m.path });
   }
@@ -253,7 +353,7 @@ function generateAllMoves(board: Board, side: Side): AnyMove[] {
   }
 
   return moves;
-} // <<< close generateAllMoves
+}
 
 // Move ordering heuristic: shallow eval of child + center bias + short paths + killer/history.
 function orderMoves(
@@ -272,11 +372,8 @@ function orderMoves(
 
     let centerBias = 0;
     if (landingIdx1 > 0) {
-      const xy = coordsOf(landingIdx1 - 1) as any;
-      if (xy) {
-        const { x, y } = xy;
-        centerBias = -(Math.abs(x) + Math.abs(y));
-      }
+      const { x, y } = coordsOf(landingIdx1 - 1);
+      centerBias = -(Math.abs(x) + Math.abs(y));
     }
 
     let val = 0;
@@ -321,21 +418,23 @@ function searchAlphaBeta(
 ): { score: Score; best?: AnyMove } {
   searchStats.nodes++;
 
-  // time check
+  // 0) Time check
   if (opts.maxMs && performance.now() - startMs > opts.maxMs) {
     return { score: evaluate(board, side) };
+  }
+
+  // 1) Terminal check (ring / alt-win)
+  const tScore = terminalScore(board, side);
+  if (tScore !== null) {
+    return { score: tScore };
   }
 
   // Keep originals for TT flag computation
   const originalAlpha = alpha;
   const originalBeta = beta;
 
-  // TT probe
+  // 2) TT probe
   const key = boardKey(board, side);
-
-  // Zobrist-based position key (already defined above as boardKey)
-
-
   const tt = TT.get(key);
   if (tt && tt.depth >= depth) {
     searchStats.ttHits++;
@@ -349,7 +448,7 @@ function searchAlphaBeta(
     return { score: evaluate(board, side) };
   }
 
-  // Generate & order
+  // 3) Generate & order
   const moves = orderMoves(board, side, generateAllMoves(board, side), ply);
 
   // Try TT's best move first if present
@@ -363,6 +462,8 @@ function searchAlphaBeta(
   }
 
   if (moves.length === 0) {
+    // No moves → treat as terminal from eval POV (but we already checked
+    // ring/alt-win above, so this is just "stuck" = static evaluation).
     return { score: evaluate(board, side) };
   }
 
@@ -377,11 +478,8 @@ function searchAlphaBeta(
     try {
       child = applyMoveCloned(board, side, mv);
     } catch {
-      // If move application throws, skip this move
-      continue;
+      continue; // move application threw → skip this move
     }
-
-    // moves passed through generateAllMoves already have clash filtered
 
     // Late Move Reductions: reduce depth for unpromising late quiet moves
     let newDepth = depth - 1;
@@ -423,13 +521,13 @@ function searchAlphaBeta(
     }
   }
 
-  // Fallback in pathological case where every move threw
+  // Fallback if every move threw for some reason
   if (!best || value === -Infinity) {
     const evalNow = evaluate(board, side);
     return { score: evalNow };
   }
 
-  // Store in TT
+  // 4) Store in TT
   let flag: TTFlag = "EXACT";
   if (value <= originalAlpha) flag = "UPPER";
   else if (value >= originalBeta) flag = "LOWER";
@@ -592,7 +690,6 @@ export function selfPlayGame(
   for (let ply = 0; ply < maxPlies; ply++) {
     const mv = pickBestMove(board, side, depth, { maxMs: opts.maxMsPerMove });
     if (!mv) {
-      // No move found: treat as terminal from evaluation POV.
       break;
     }
 
