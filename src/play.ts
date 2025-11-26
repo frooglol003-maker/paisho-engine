@@ -1,17 +1,33 @@
-// src/play.ts
+ // src/play.ts
+// Interactive CLI to play Pai Sho vs the engine, with:
+// - per-side tile pools
+// - ring + alt-win detection after every move
+// - optional learning of eval weights from your game (ridge regression)
+
 import readline from "readline";
 import { performance } from "perf_hooks";
 
 import { Board, TypeId, Owner, packPiece, unpackPiece } from "./board";
 import { coordsOf, indexOf } from "./coords";
-import { pickBestMove, applyPlannedArrange } from "./engine";
+import {
+  pickBestMove,
+  applyPlannedArrange,
+  generateLegalArrangeMoves,
+} from "./engine";
 import { applyWheel, applyBoatFlower, applyBoatAccent } from "./parse";
-import { validateArrange, detectAnyClash, listHarmonyEdges, findHarmonyRings, getRingOwners} from "./move";
+import {
+  validateArrange,
+  detectAnyClash,
+  listHarmonyEdges,
+  getRingOwners,
+  buildHarmonyGraph,
+} from "./move";
 import { getGardenType } from "./rules";
+import { evaluate } from "./eval";
 
-// ---------- CLI ----------
+// ---------- CLI args ----------
 const args = Object.fromEntries(
-  process.argv.slice(2).map(s => {
+  process.argv.slice(2).map((s) => {
     const m = s.match(/^--([^=]+)=(.*)$/);
     if (m) return [m[1], m[2]];
     return [s.replace(/^--/, ""), true];
@@ -19,8 +35,8 @@ const args = Object.fromEntries(
 );
 
 type Side = "host" | "guest";
-const HUMAN: Side = (args.human === "guest" ? "guest" : "host");
-const FIRST: Side = (args.first === "guest" ? "guest" : "host");
+const HUMAN: Side = args.human === "guest" ? "guest" : "host";
+const FIRST: Side = args.first === "guest" ? "guest" : "host";
 const DEPTH = Math.max(1, parseInt(String(args.depth ?? "3"), 10));
 const TIMEMS = args.time ? Math.max(1, parseInt(String(args.time), 10)) : undefined;
 
@@ -42,19 +58,34 @@ function xyFromString(s: string): { x: number; y: number } {
 // ---------- Pools & counting ----------
 type CountMap = Record<string, number>;
 const PIECE_KEYS: [TypeId, string][] = [
-  [TypeId.R3, "R3"], [TypeId.R4, "R4"], [TypeId.R5, "R5"],
-  [TypeId.W3, "W3"], [TypeId.W4, "W4"], [TypeId.W5, "W5"],
-  [TypeId.Lotus, "Lotus"], [TypeId.Orchid, "Orchid"],
-  [TypeId.Rock, "Rock"], [TypeId.Wheel, "Wheel"],
-  [TypeId.Boat, "Boat"], [TypeId.Knotweed, "Knotweed"],
+  [TypeId.R3, "R3"],
+  [TypeId.R4, "R4"],
+  [TypeId.R5, "R5"],
+  [TypeId.W3, "W3"],
+  [TypeId.W4, "W4"],
+  [TypeId.W5, "W5"],
+  [TypeId.Lotus, "Lotus"],
+  [TypeId.Orchid, "Orchid"],
+  [TypeId.Rock, "Rock"],
+  [TypeId.Wheel, "Wheel"],
+  [TypeId.Boat, "Boat"],
+  [TypeId.Knotweed, "Knotweed"],
 ];
 
-// **Total** starting pool for EACH player.
+// Total starting pool for EACH player.
 const STANDARD_POOL: CountMap = {
-  R3: 3, R4: 3, R5: 3,
-  W3: 3, W4: 3, W5: 3,
-  Lotus: 1, Orchid: 1,
-  Rock: 1, Wheel: 1, Boat: 1, Knotweed: 1,
+  R3: 3,
+  R4: 3,
+  R5: 3,
+  W3: 3,
+  W4: 3,
+  W5: 3,
+  Lotus: 1,
+  Orchid: 1,
+  Rock: 1,
+  Wheel: 1,
+  Boat: 1,
+  Knotweed: 1,
 };
 
 function keyForType(type: TypeId): string | undefined {
@@ -86,7 +117,7 @@ function countsOnBoard(board: Board): { host: CountMap; guest: CountMap } {
     if (!key) continue;
 
     if (d.owner === Owner.Host) host[key] = (host[key] || 0) + 1;
-    else                        guest[key] = (guest[key] || 0) + 1;
+    else guest[key] = (guest[key] || 0) + 1;
   }
   return { host, guest };
 }
@@ -105,6 +136,7 @@ function remainingFromBoard(board: Board): { host: CountMap; guest: CountMap } {
   return { host: hostRem, guest: guestRem };
 }
 
+// ---------- ANSI helpers ----------
 const ESC = (s: string) => `\u001b[${s}m`;
 const RESET = ESC("0");
 const BOLD = ESC("1");
@@ -112,54 +144,21 @@ const DIM = ESC("2");
 const FG = (n: number) => ESC(`38;5;${n}`);
 const BG = (n: number) => ESC(`48;5;${n}`);
 
-const FG_HOST  = FG(39);   // blue-ish
-const FG_GUEST = FG(213);  // magenta-ish
-const GRID_DOT = FG(240);  // faint dot color
+const FG_HOST = FG(39); // blue-ish
+const FG_GUEST = FG(213); // magenta-ish
+const GRID_DOT = FG(240); // faint dot color
 
 const BG_NEUTRAL = BG(137); // brown
-const BG_RED     = BG(166); // red
-const BG_WHITE   = BG(230); // light wood
-const BG_GATE    = BG(34);  // green
+const BG_RED = BG(166); // red
+const BG_WHITE = BG(230); // light wood
+const BG_GATE = BG(34); // green
 
-// Bright cyan for harmony “wires” between pieces
-const FG_HARM_HOST  = FG(45);   // bright cyan for host harmonies
-const FG_HARM_GUEST = FG(201);  // bright magenta for guest harmonies
-/**
- * Compute all board indices (1-based) that lie on an active harmony segment
- * between two tiles of the same side. We mark the EMPTY intersections in
- * between them so the UI can draw a bright line.
- */
-function computeHarmonySegments(board: Board): Set<number> {
-  const segs = new Set<number>();
-  const edges = listHarmonyEdges(board);
+// Harmony “wire” colors
+const FG_HARM_HOST = FG(45); // bright cyan for host harmonies
+const FG_HARM_GUEST = FG(201); // bright magenta for guest harmonies
 
-  for (const e of edges) {
-    const a = coordsOf(e.aIdx1 - 1);
-    const b = coordsOf(e.bIdx1 - 1);
-    if (!a || !b) continue;
-
-    // Same file (vertical)
-    if (a.x === b.x) {
-      const x = a.x;
-      const step = a.y < b.y ? 1 : -1;
-      for (let y = a.y + step; y !== b.y; y += step) {
-        const i0 = indexOf(x, y);
-        if (i0 !== -1) segs.add(i0 + 1);
-      }
-    }
-    // Same rank (horizontal)
-    else if (a.y === b.y) {
-      const y = a.y;
-      const step = a.x < b.x ? 1 : -1;
-      for (let x = a.x + step; x !== b.x; x += step) {
-        const i0 = indexOf(x, y);
-        if (i0 !== -1) segs.add(i0 + 1);
-      }
-    }
-  }
-
-  return segs;
-}
+// ---------- Harmony overlay + board renderer ----------
+type HarmonyEdgeLite = { aIdx1: number; bIdx1: number; owner: Side };
 
 function countsToLines(label: string, m: CountMap, color: string): string[] {
   const rows: string[] = [];
@@ -176,15 +175,12 @@ function countsToLines(label: string, m: CountMap, color: string): string[] {
   return rows;
 }
 
-// ---------- Opening: gates & plant logic ----------
 const NORTH_GATE = { x: 0, y: +BOARD_RADIUS };
 const SOUTH_GATE = { x: 0, y: -BOARD_RADIUS };
 
 function gateFor(side: Side): { x: number; y: number } {
-  // Guest plants in SOUTH, host in NORTH (canonical coords)
   return side === "guest" ? SOUTH_GATE : NORTH_GATE;
 }
-
 function mirrorGateFor(side: Side): { x: number; y: number } {
   return side === "guest" ? NORTH_GATE : SOUTH_GATE;
 }
@@ -195,162 +191,80 @@ function isEmptyBoard(b: Board): boolean {
   return true;
 }
 
-function plantOpening(b: Board, who: Side, type: TypeId) {
-  // Enforce pool limit for the planting side
-  const rem = remainingFromBoard(b);
-  const pool = who === "host" ? rem.host : rem.guest;
-  const key = keyForType(type);
-  if (!key) throw new Error(`Unknown type for pool: ${type}`);
-  if ((pool[key] ?? 0) <= 0) {
-    throw new Error(`No ${key} tiles remaining for ${who}`);
-  }
-
-  const g = gateFor(who);
-  const m = mirrorGateFor(who);
-  const gi = idx1(g.x, g.y);
-  const mi = idx1(m.x, m.y);
-
-  if (b.getAtIndex(gi)) throw new Error(`Gate ${g.x},${g.y} occupied`);
-  if (b.getAtIndex(mi)) throw new Error(`Mirror gate ${m.x},${m.y} occupied`);
-
-  b.setAtIndex(gi, packPiece(type, who === "host" ? Owner.Host : Owner.Guest));
-  const otherOwner = who === "host" ? Owner.Guest : Owner.Host;
-  b.setAtIndex(mi, packPiece(type, otherOwner));
-}
-
-function enginePickOpeningType(board: Board, side: Side): TypeId | null {
-  const rem = remainingFromBoard(board);
-  const pool = side === "host" ? rem.host : rem.guest;
-
-  // Only basic numbered flowers for openings
-  const order = ["R3","W3","R4","W4","R5","W5"] as const;
-  for (const k of order) {
-    if ((pool[k] ?? 0) > 0) return toTypeId(k);
-  }
-  return null;
-}
-
 function isGatePoint(x: number, y: number): boolean {
-  return (x === -8 && y === 0) ||
-         (x ===  8 && y === 0) ||
-         (x ===  0 && y === 8) ||
-         (x ===  0 && y === -8);
+  return (
+    (x === -8 && y === 0) ||
+    (x === 8 && y === 0) ||
+    (x === 0 && y === 8) ||
+    (x === 0 && y === -8)
+  );
 }
 
-// FINAL coloring formula (canonical coords)
 function cellBg(x: number, y: number): string {
-  // 1) midlines are brown (overridden for gates)
+  // midlines
   if (x === 0 || y === 0) {
     return isGatePoint(x, y) ? BG_GATE : BG_NEUTRAL;
   }
 
-  // 2) inner diamond
   const manhattan = Math.abs(x) + Math.abs(y);
   if (manhattan < 7) {
     const q1 = x > 0 && y > 0;
     const q3 = x < 0 && y < 0;
-    if (q1 || q3) return BG_RED;   // quadrants 1 & 3
-    return BG_WHITE;               // quadrants 2 & 4
+    if (q1 || q3) return BG_RED;
+    return BG_WHITE;
   }
 
-  // 3) outside diamond
   return BG_NEUTRAL;
 }
 
 function symOf(type: TypeId): string {
   switch (type) {
-    case TypeId.R3: return "R3";
-    case TypeId.R4: return "R4";
-    case TypeId.R5: return "R5";
-    case TypeId.W3: return "W3";
-    case TypeId.W4: return "W4";
-    case TypeId.W5: return "W5";
-    case TypeId.Lotus: return "L ";
-    case TypeId.Orchid: return "O ";
-    case TypeId.Rock: return "⛰ ";
-    case TypeId.Wheel: return "⟳ ";
-    case TypeId.Boat: return "⛵";
-    case TypeId.Knotweed: return "✣ ";
-    default: return "· ";
+    case TypeId.R3:
+      return "R3";
+    case TypeId.R4:
+      return "R4";
+    case TypeId.R5:
+      return "R5";
+    case TypeId.W3:
+      return "W3";
+    case TypeId.W4:
+      return "W4";
+    case TypeId.W5:
+      return "W5";
+    case TypeId.Lotus:
+      return "L ";
+    case TypeId.Orchid:
+      return "O ";
+    case TypeId.Rock:
+      return "⛰ ";
+    case TypeId.Wheel:
+      return "⟳ ";
+    case TypeId.Boat:
+      return "⛵";
+    case TypeId.Knotweed:
+      return "✣ ";
+    default:
+      return "· ";
   }
 }
 
 function safeXY(idx1Val: number): string {
   try {
-    if (!Number.isInteger(idx1Val) || idx1Val < 1) return "<?>"; 
+    if (!Number.isInteger(idx1Val) || idx1Val < 1) return "<?>";
+
     const xy = coordsOf(idx1Val - 1) as { x: number; y: number } | undefined;
-    if (!xy) return "<?>"; 
+    if (!xy) return "<?>";
+
     return `${xy.x},${xy.y}`;
   } catch {
-    return "<?>"; 
+    return "<?>"; // if coordsOf throws
   }
 }
 
-// ---------- Helper conversions ----------
-function toTypeId(name: string): TypeId {
-  const normalized = name.trim().toUpperCase();
-  switch (normalized) {
-    case "R3": return TypeId.R3;
-    case "R4": return TypeId.R4;
-    case "R5": return TypeId.R5;
-    case "W3": return TypeId.W3;
-    case "W4": return TypeId.W4;
-    case "W5": return TypeId.W5;
-    case "LOTUS": return TypeId.Lotus;
-    case "ORCHID": return TypeId.Orchid;
-    case "ROCK": return TypeId.Rock;
-    case "WHEEL": return TypeId.Wheel;
-    case "BOAT": return TypeId.Boat;
-    case "KNOTWEED": return TypeId.Knotweed;
-    default:
-      throw new Error(`Unknown piece type: ${name}`);
-  }
-}
-
-function toOwner(name: string): Owner {
-  const n = name.trim().toLowerCase();
-  if (n === "host" || n === "h") return Owner.Host;
-  if (n === "guest" || n === "g") return Owner.Guest;
-  throw new Error(`Unknown owner: ${name}`);
-}
-
-function isWhiteFlower(type: TypeId): boolean {
-  return type === TypeId.W3 || type === TypeId.W4 || type === TypeId.W5;
-}
-
-function isRedFlower(type: TypeId): boolean {
-  return type === TypeId.R3 || type === TypeId.R4 || type === TypeId.R5;
-}
-
-function boardViolatesGarden(board: Board): boolean {
-  const N = (board as any).size1Based ?? 249;
-  for (let i = 1; i <= N; i++) {
-    const packed = board.getAtIndex(i);
-    if (!packed) continue;
-
-    const piece = unpackPiece(packed)!;
-    const t = piece.type;
-
-    // Flowers + special flowers are garden-sensitive
-    if (
-      t === TypeId.R3 || t === TypeId.R4 || t === TypeId.R5 ||
-      t === TypeId.W3 || t === TypeId.W4 || t === TypeId.W5 ||
-      t === TypeId.Lotus || t === TypeId.Orchid
-    ) {
-      const { x, y } = coordsOf(i - 1);
-      const g = getGardenType(x, y); // "red" | "white" | "neutral"
-
-      if (g === "red" && isWhiteFlower(t)) return true;
-      if (g === "white" && isRedFlower(t)) return true;
-    }
-  }
-  return false;
-}
-
-// ---------- Board renderer (flipped so y=+8 is at top visually) ----------
+// Board renderer with sidebar + harmony overlay
 function boardWithSidebar(board: Board): string {
-  const harmonySegs = computeHarmonySegments(board);
-  const widths = [9,11,13,15, 17,17,17,17,17,17,17,17,17, 15,13,11,9];
+  // Precompute row sizes for 249-pt hex diamond
+  const widths = [9, 11, 13, 15, 17, 17, 17, 17, 17, 17, 17, 17, 17, 15, 13, 11, 9];
   const rowStarts: number[] = [];
   let base = 1;
   for (let r = 0; r < widths.length; r++) {
@@ -358,18 +272,17 @@ function boardWithSidebar(board: Board): string {
     base += widths[r];
   }
 
-    // --- Harmony overlay: build a map of indices that lie on harmony lines ---
+  // Harmony overlay: mark all squares (including endpoints) that lie on harmony segments
   const harmonyMarks = new Map<number, Side>(); // idx1 -> "host" | "guest"
-  const harmonyEdges = (listHarmonyEdges(board) as HarmonyEdgeLite[]);
+  const harmonyEdges = listHarmonyEdges(board) as HarmonyEdgeLite[];
 
   for (const e of harmonyEdges) {
-    const ownerSide = e.owner; // "host" | "guest"
+    const ownerSide = e.owner;
     const aC = coordsOf(e.aIdx1 - 1);
     const bC = coordsOf(e.bIdx1 - 1);
     if (!aC || !bC) continue;
 
     if (aC.x === bC.x) {
-      // vertical segment
       const x = aC.x;
       const step = aC.y < bC.y ? 1 : -1;
       for (let y = aC.y; ; y += step) {
@@ -380,7 +293,6 @@ function boardWithSidebar(board: Board): string {
         if (y === bC.y) break;
       }
     } else if (aC.y === bC.y) {
-      // horizontal segment
       const y = aC.y;
       const step = aC.x < bC.x ? 1 : -1;
       for (let x = aC.x; ; x += step) {
@@ -417,7 +329,7 @@ function boardWithSidebar(board: Board): string {
   const sidebarPad = "   ";
   const boardLines: string[] = [];
 
-  // Flip vertically: start from highest-y row
+  // Flip vertically (y=+8 at top)
   for (let vr = 0; vr < widths.length; vr++) {
     const r = widths.length - 1 - vr;
     const w = widths[r];
@@ -436,10 +348,9 @@ function boardWithSidebar(board: Board): string {
       }
       const { x, y } = xy;
       const bg = cellBg(x, y);
-                 const mark = harmonyMarks.get(idx);
+      const mark = harmonyMarks.get(idx);
 
       if (!p) {
-        // Empty intersection: draw a colored harmony dot if it's on a harmony line
         if (mark) {
           const fg = mark === "host" ? FG_HARM_HOST : FG_HARM_GUEST;
           cells.push(`${bg}${fg}· ${RESET}`);
@@ -447,8 +358,6 @@ function boardWithSidebar(board: Board): string {
           cells.push(`${bg}${GRID_DOT}· ${RESET}`);
         }
       } else {
-        // Tile present: keep normal piece coloring for ownership,
-        // but we could later add special styling if we want.
         const d = unpackPiece(p)!;
         const fg = d.owner === Owner.Host ? FG_HOST : FG_GUEST;
         const sym = symOf(d.type);
@@ -469,31 +378,43 @@ function boardWithSidebar(board: Board): string {
 
 // ---------- Move helpers ----------
 function printMove(m: any) {
-  if (!m) { console.log("Engine: no legal move."); return; }
+  if (!m) {
+    console.log("Engine: no legal move.");
+    return;
+  }
   if (m.kind === "arrange") {
     const from = safeXY(m.from);
-    const dest = Array.isArray(m.path) && m.path.length > 0 ? safeXY(m.path[m.path.length - 1]) : "<?>"
-    console.log(`Engine → ARRANGE ${from} -> ${dest}${Array.isArray(m.path) ? ` (steps=${m.path.length})` : ""}`);
+    const dest =
+      Array.isArray(m.path) && m.path.length > 0
+        ? safeXY(m.path[m.path.length - 1])
+        : "<?>";
+
+    console.log(
+      `Engine → ARRANGE ${from} -> ${dest}${
+        Array.isArray(m.path) ? ` (steps=${m.path.length})` : ""
+      }`
+    );
   } else if (m.kind === "wheel") {
     console.log(`Engine → WHEEL at ${safeXY(m.center)}`);
   } else if (m.kind === "boatFlower") {
-    console.log(`Engine → BOAT-FLOWER ${safeXY(m.from)} -> ${safeXY(m.to)} (boat idx=${m.boat})`);
+    console.log(
+      `Engine → BOAT-FLOWER ${safeXY(m.from)} -> ${safeXY(
+        m.to
+      )} (boat idx=${m.boat})`
+    );
   } else if (m.kind === "boatAccent") {
-    console.log(`Engine → BOAT-ACCENT target ${safeXY(m.target)} (boat idx=${m.boat})`);
+    console.log(
+      `Engine → BOAT-ACCENT target ${safeXY(m.target)} (boat idx=${m.boat})`
+    );
   } else {
     console.log("Engine →", m);
   }
 }
 
+// Apply a move on a cloned board and return it, with clash check.
 function applyAnyMove(board: Board, side: Side, m: any): Board {
-  // Apply on a fresh Board so we can validate the result before committing.
-  const trial = new Board();
-  const N = (board as any).size1Based ?? 249;
-  for (let i = 1; i <= N; i++) {
-    trial.setAtIndex(i, board.getAtIndex(i) || 0);
-  }
+  const trial = board.clone();
 
-  // Actually apply the move to the trial board.
   let result: Board;
   switch (m.kind) {
     case "arrange":
@@ -512,7 +433,6 @@ function applyAnyMove(board: Board, side: Side, m: any): Board {
       throw new Error(`unknown move kind: ${m.kind}`);
   }
 
-  // === CLASH RULE ===
   if (detectAnyClash(result)) {
     throw new Error("illegal: move produces a clash position");
   }
@@ -561,9 +481,14 @@ Commands:
   arr x,y -> a,b; c,d; ...     arrange move with path
                                (with a single destination, path is auto-built)
   wheel x,y                    rotate neighbors around wheel at x,y
-  boatf boatX,boatY fromX,fromY -> toX,toY
+  boatf boatX,boatY fromX,fromY
+                               boat bonus on flower (prompts for destination)
   boata boatX,boatY targetX,targetY
+                               boat bonus on accent (remove / knock)
   place TYPE OWNER x,y [next]  force-place a tile; 'next' hands over move
+  score                        show ring/alt-win status from current board
+  rings                        raw ring cycles (debug)
+  learn                        run regression on this game and print eval weights
   undo                         undo last move (engine or human)
   print                        redraw the board
   help                         show this help
@@ -575,74 +500,87 @@ function other(side: Side): Side {
   return side === "host" ? "guest" : "host";
 }
 
-// ---------- Endgame ring check ----------
-function checkForGameEnd(board: Board): void {
-  const rings = getRingOwners(board);
-
-  if (!rings.host && !rings.guest) return;
-
-  if (rings.host && rings.guest) {
-    console.log(
-      "Game over: draw – both players created a harmony ring at the same time!"
-    );
-    return;
-  }
-
-  if (rings.host) {
-    console.log("Game over: HOST wins by creating a harmony ring!");
-  } else {
-    console.log("Game over: GUEST wins by creating a harmony ring!");
-  }
+// ---------- Garden / flower helpers ----------
+function isWhiteFlower(type: TypeId): boolean {
+  return type === TypeId.W3 || type === TypeId.W4 || type === TypeId.W5;
 }
 
+function isRedFlower(type: TypeId): boolean {
+  return type === TypeId.R3 || type === TypeId.R4 || type === TypeId.R5;
+}
 
-// ---------- Harmony bonus helpers ----------
+function boardViolatesGarden(board: Board): boolean {
+  const N = (board as any).size1Based ?? 249;
+  for (let i = 1; i <= N; i++) {
+    const packed = board.getAtIndex(i);
+    if (!packed) continue;
 
-// listHarmonyEdges return type shim
-type HarmonyEdgeLite = { aIdx1: number; bIdx1: number; owner: Side };
+    const piece = unpackPiece(packed)!;
+    const t = piece.type;
 
-// ----- Endgame helpers -----
+    if (
+      t === TypeId.R3 ||
+      t === TypeId.R4 ||
+      t === TypeId.R5 ||
+      t === TypeId.W3 ||
+      t === TypeId.W4 ||
+      t === TypeId.W5 ||
+      t === TypeId.Lotus ||
+      t === TypeId.Orchid
+    ) {
+      const { x, y } = coordsOf(i - 1);
+      const g = getGardenType(x, y); // "red" | "white" | "neutral"
 
-type RingOutcome = "none" | "host" | "guest" | "both";
-
-/**
- * Check for harmony rings that enclose the origin.
- * A ring only "belongs" to a side if all pieces in that ring
- * are owned by that side. Mixed-owner rings are ignored.
- */
-function checkRings(board: Board): RingOutcome {
-  const rings = findHarmonyRings(board);
-  let hostRing = false;
-  let guestRing = false;
-
-  for (const ring of rings) {
-    const owners = new Set<Owner>();
-    for (const idx1 of ring) {
-      const packed = board.getAtIndex(idx1);
-      if (!packed) continue;
-      const piece = unpackPiece(packed)!;
-      owners.add(piece.owner);
+      if (g === "red" && isWhiteFlower(t)) return true;
+      if (g === "white" && isRedFlower(t)) return true;
     }
-
-    // Must be monochrome to count
-    if (owners.size !== 1) continue;
-
-    const only = Array.from(owners)[0];
-    if (only === Owner.Host) hostRing = true;
-    else if (only === Owner.Guest) guestRing = true;
   }
-
-  if (hostRing && guestRing) return "both";
-  if (hostRing) return "host";
-  if (guestRing) return "guest";
-  return "none";
+  return false;
 }
 
+// ---------- Opening / planting ----------
+function plantOpening(b: Board, who: Side, type: TypeId) {
+  const rem = remainingFromBoard(b);
+  const pool = who === "host" ? rem.host : rem.guest;
+  const key = keyForType(type);
+  if (!key) throw new Error(`Unknown type for pool: ${type}`);
+  if ((pool[key] ?? 0) <= 0) {
+    throw new Error(`No ${key} tiles remaining for ${who}`);
+  }
+
+  const g = gateFor(who);
+  const m = mirrorGateFor(who);
+  const gi = idx1(g.x, g.y);
+  const mi = idx1(m.x, m.y);
+
+  if (b.getAtIndex(gi)) throw new Error(`Gate ${g.x},${g.y} occupied`);
+  if (b.getAtIndex(mi)) throw new Error(`Mirror gate ${m.x},${m.y} occupied`);
+
+  b.setAtIndex(gi, packPiece(type, who === "host" ? Owner.Host : Owner.Guest));
+  const otherOwner = who === "host" ? Owner.Guest : Owner.Host;
+  b.setAtIndex(mi, packPiece(type, otherOwner));
+}
+
+function enginePickOpeningType(board: Board, side: Side): TypeId | null {
+  const rem = remainingFromBoard(board);
+  const pool = side === "host" ? rem.host : rem.guest;
+
+  // Prefer standard flowers for opening
+  const order = ["R3", "W3", "R4", "W4", "R5", "W5"] as const;
+  for (const k of order) {
+    if ((pool[k] ?? 0) > 0) return toTypeId(k);
+  }
+  return null;
+}
+
+// ---------- Endgame helpers ----------
 /**
  * Count harmonies that cross the horizontal midline y=0.
  * (One endpoint y>0, the other y<0.)
  */
-function countCrossMidlineHarmonies(board: Board): { host: number; guest: number } {
+function countCrossMidlineHarmonies(
+  board: Board
+): { host: number; guest: number } {
   const edges = listHarmonyEdges(board) as HarmonyEdgeLite[];
   let host = 0;
   let guest = 0;
@@ -665,15 +603,367 @@ function countCrossMidlineHarmonies(board: Board): { host: number; guest: number
   return { host, guest };
 }
 
-// Player can plant only if they have NO tile in ANY gate, and some gate is empty.
+type GameEndInfo = {
+  over: boolean;
+  resultHost: number; // +1 host win, -1 guest win, 0 draw
+  reason: string;
+};
+
+/**
+ * Unified game-end checker:
+ * 1) Ring wins (from getRingOwners).
+ * 2) Alt-win: if a side has no standard flowers, side with more cross-midline
+ *    harmonies wins.
+ */
+function checkGameEnd(board: Board): GameEndInfo {
+  const rings = getRingOwners(board);
+  if (rings.host || rings.guest) {
+    if (rings.host && rings.guest) {
+      return {
+        over: true,
+        resultHost: 0,
+        reason: "Draw: both players formed a ring.",
+      };
+    }
+    if (rings.host) {
+      return {
+        over: true,
+        resultHost: +1,
+        reason: "Host wins by ring.",
+      };
+    }
+    return {
+      over: true,
+      resultHost: -1,
+      reason: "Guest wins by ring.",
+    };
+  }
+
+  // Alt-win: when at least one side has no standard flowers left
+  const onBoard = countsOnBoard(board);
+  const hostStandard =
+    (onBoard.host.R3 ?? 0) +
+    (onBoard.host.R4 ?? 0) +
+    (onBoard.host.R5 ?? 0) +
+    (onBoard.host.W3 ?? 0) +
+    (onBoard.host.W4 ?? 0) +
+    (onBoard.host.W5 ?? 0);
+  const guestStandard =
+    (onBoard.guest.R3 ?? 0) +
+    (onBoard.guest.R4 ?? 0) +
+    (onBoard.guest.R5 ?? 0) +
+    (onBoard.guest.W3 ?? 0) +
+    (onBoard.guest.W4 ?? 0) +
+    (onBoard.guest.W5 ?? 0);
+
+  if (hostStandard === 0 || guestStandard === 0) {
+    const { host, guest } = countCrossMidlineHarmonies(board);
+    if (host > guest) {
+      return {
+        over: true,
+        resultHost: +1,
+        reason:
+          "Host wins by alt-win: more cross-midline harmonies when a side ran out of standard flowers.",
+      };
+    } else if (guest > host) {
+      return {
+        over: true,
+        resultHost: -1,
+        reason:
+          "Guest wins by alt-win: more cross-midline harmonies when a side ran out of standard flowers.",
+      };
+    } else {
+      return {
+        over: true,
+        resultHost: 0,
+        reason:
+          "Draw: alt-win condition (no standard flowers for one side) but cross-midline harmonies are equal.",
+      };
+    }
+  }
+
+  return { over: false, resultHost: 0, reason: "" };
+}
+
+// ---------- Learning helpers (same feature family as selfplay.ts) ----------
+type Features = {
+  materialDiff: number;
+  harmonyDegDiff: number;
+  centerDiff: number;
+  mobilityDiff: number;
+};
+
+type Vec = number[];
+type Mat = number[][];
+
+function material(board: Board): { host: number; guest: number } {
+  const N = (board as any).size1Based ?? 249;
+  let host = 0,
+    guest = 0;
+  for (let i = 1; i <= N; i++) {
+    const p = board.getAtIndex(i);
+    if (!p) continue;
+    const d = unpackPiece(p)!;
+    const val =
+      d.type === TypeId.R3 || d.type === TypeId.W3
+        ? 3
+        : d.type === TypeId.R4 || d.type === TypeId.W4
+        ? 4
+        : d.type === TypeId.R5 || d.type === TypeId.W5
+        ? 5
+        : d.type === TypeId.Lotus
+        ? 7
+        : d.type === TypeId.Orchid
+        ? 6
+        : 0;
+    if (d.owner === Owner.Host) host += val;
+    else guest += val;
+  }
+  return { host, guest };
+}
+
+function harmonyDeg(board: Board): { host: number; guest: number } {
+  const g = buildHarmonyGraph(board);
+  let host = 0,
+    guest = 0;
+  for (const [node, neighbors] of g) {
+    const p = board.getAtIndex(node);
+    if (!p) continue;
+    const d = unpackPiece(p)!;
+    if (d.owner === Owner.Host) host += neighbors.length;
+    else guest += neighbors.length;
+  }
+  return { host, guest };
+}
+
+function centerCount(board: Board): { host: number; guest: number } {
+  const N = (board as any).size1Based ?? 249;
+  let host = 0,
+    guest = 0;
+  for (let i = 1; i <= N; i++) {
+    const p = board.getAtIndex(i);
+    if (!p) continue;
+    const d = unpackPiece(p)!;
+    const { x, y } = coordsOf(i - 1);
+    const isCenter = Math.abs(x) + Math.abs(y) <= 3;
+    if (!isCenter) continue;
+    if (d.owner === Owner.Host) host++;
+    else guest++;
+  }
+  return { host, guest };
+}
+
+function mobility(board: Board): { host: number; guest: number } {
+  const hostMoves = generateLegalArrangeMoves(board, "host").length;
+  const guestMoves = generateLegalArrangeMoves(board, "guest").length;
+  return { host: hostMoves, guest: guestMoves };
+}
+
+function extractFeatures(board: Board): Features {
+  const m = material(board);
+  const h = harmonyDeg(board);
+  const c = centerCount(board);
+  const mo = mobility(board);
+  return {
+    materialDiff: m.host - m.guest,
+    harmonyDegDiff: h.host - h.guest,
+    centerDiff: c.host - c.guest,
+    mobilityDiff: mo.host - mo.guest,
+  };
+}
+
+// Linear algebra helpers for ridge regression
+function transpose(A: Mat): Mat {
+  const m = A.length,
+    n = A[0].length;
+  const T: Mat = Array.from({ length: n }, () => Array(m).fill(0));
+  for (let i = 0; i < m; i++)
+    for (let j = 0; j < n; j++) T[j][i] = A[i][j];
+  return T;
+}
+
+function mul(A: Mat, B: Mat): Mat {
+  const m = A.length,
+    n = B[0].length,
+    p = B.length;
+  const C: Mat = Array.from({ length: m }, () => Array(n).fill(0));
+  for (let i = 0; i < m; i++) {
+    for (let k = 0; k < p; k++) {
+      const aik = A[i][k];
+      if (aik === 0) continue;
+      for (let j = 0; j < n; j++) C[i][j] += aik * B[k][j];
+    }
+  }
+  return C;
+}
+
+function mulVec(A: Mat, v: Vec): Vec {
+  const m = A.length,
+    n = A[0].length;
+  const out = new Array(m).fill(0);
+  for (let i = 0; i < m; i++) {
+    let s = 0;
+    for (let j = 0; j < n; j++) s += A[i][j] * v[j];
+    out[i] = s;
+  }
+  return out;
+}
+
+function invSymmetric(M: Mat): Mat {
+  const n = M.length;
+  const A: Mat = M.map((r) => r.slice());
+  const I: Mat = Array.from({ length: n }, (_, i) =>
+    Array.from({ length: n }, (_, j) => (i === j ? 1 : 0))
+  );
+  for (let i = 0; i < n; i++) {
+    let maxR = i,
+      maxV = Math.abs(A[i][i]);
+    for (let r = i + 1; r < n; r++) {
+      const v = Math.abs(A[r][i]);
+      if (v > maxV) {
+        maxV = v;
+        maxR = r;
+      }
+    }
+    if (maxV < 1e-12) throw new Error("Matrix near-singular in ridge");
+    if (maxR !== i) {
+      [A[i], A[maxR]] = [A[maxR], A[i]];
+      [I[i], I[maxR]] = [I[maxR], I[i]];
+    }
+    const piv = A[i][i];
+    for (let j = 0; j < n; j++) {
+      A[i][j] /= piv;
+      I[i][j] /= piv;
+    }
+    for (let r = 0; r < n; r++) {
+      if (r === i) continue;
+      const f = A[r][i];
+      if (f === 0) continue;
+      for (let j = 0; j < n; j++) {
+        A[r][j] -= f * A[i][j];
+        I[r][j] -= f * I[i][j];
+      }
+    }
+  }
+  return I;
+}
+
+function ridge(X: Mat, y: Vec, lambda = 1e-3): Vec {
+  const XT = transpose(X);
+  const XTX = mul(XT, X);
+  const k = XTX.length;
+  for (let i = 0; i < k; i++) XTX[i][i] += lambda;
+  const XTy = mulVec(XT, y);
+  const XTXinv = invSymmetric(XTX);
+  return mulVec(XTXinv, XTy);
+}
+
+function resultToScoreFromHost(finalScoreHost: number): number {
+  if (finalScoreHost > 0) return +1;
+  if (finalScoreHost < 0) return -1;
+  return 0;
+}
+
+// Collect samples from this game
+const gamePositionFeatures: Features[] = [];
+let gameEnded = false;
+let gameResultHost: number | null = null;
+
+// Run regression on recorded positions and a known result
+function runLearningFromGame(): void {
+  if (gamePositionFeatures.length === 0) {
+    console.log("\n[learn] No positions recorded; nothing to learn from.");
+    return;
+  }
+
+  let labelHost: number;
+  if (gameResultHost !== null) {
+    labelHost = gameResultHost;
+  } else {
+    const finalEval = evaluate(globalBoard, "host");
+    labelHost = resultToScoreFromHost(finalEval);
+    console.log(
+      `[learn] No exact result recorded; using eval(board)=${finalEval.toFixed(
+        2
+      )} → label=${labelHost}`
+    );
+  }
+
+  const X: Mat = [];
+  const y: Vec = [];
+
+  for (const f of gamePositionFeatures) {
+    X.push([f.materialDiff, f.harmonyDegDiff, f.centerDiff, f.mobilityDiff]);
+    y.push(labelHost);
+  }
+
+  if (X.length === 0) {
+    console.log("\n[learn] No samples collected.");
+    return;
+  }
+
+  let w: Vec;
+  try {
+    w = ridge(X, y, 1e-3);
+  } catch (e: any) {
+    console.log(`[learn] Ridge regression failed: ${e?.message ?? e}`);
+    return;
+  }
+
+  const [wMat, wHar, wCtr, wMob] = w;
+
+  console.log("\n---- Learned weights from this game ----\n");
+  console.log(`Samples used: ${X.length}`);
+  console.log(
+    `materialDiff: ${wMat.toFixed(6)}, harmonyDegDiff: ${wHar.toFixed(
+      6
+    )}, centerDiff: ${wCtr.toFixed(6)}, mobilityDiff: ${wMob.toFixed(6)}`
+  );
+  console.log(
+    "\n---- Paste this block into src/eval.ts (replace the scoring section) ----\n"
+  );
+  console.log(
+    `// Learned from human+engine play (${X.length} samples)\n` +
+      `const WEIGHTS = { materialDiff: ${wMat.toFixed(
+        6
+      )}, harmonyDegDiff: ${wHar.toFixed(6)}, centerDiff: ${wCtr.toFixed(
+        6
+      )}, mobilityDiff: ${wMob.toFixed(6)} };`
+  );
+  console.log(`
+export function evaluate(board: Board, pov: "host" | "guest"): number {
+  const m = (${material.toString()})(board);
+  const h = (${harmonyDeg.toString()})(board);
+  const c = (${centerCount.toString()})(board);
+  const mo = (${mobility.toString()})(board);
+  const f = {
+    materialDiff: m.host - m.guest,
+    harmonyDegDiff: h.host - h.guest,
+    centerDiff: c.host - c.guest,
+    mobilityDiff: mo.host - mo.guest,
+  };
+
+  const raw =
+    WEIGHTS.materialDiff * f.materialDiff +
+    WEIGHTS.harmonyDegDiff * f.harmonyDegDiff +
+    WEIGHTS.centerDiff   * f.centerDiff +
+    WEIGHTS.mobilityDiff * f.mobilityDiff;
+
+  return pov === "host" ? raw : -raw;
+}
+`);
+  console.log("---- end paste block ----\n");
+}
+
+// ---------- Bonus / planting helpers ----------
 function playerCanPlant(b: Board, side: Side): boolean {
   const myOwner = side === "host" ? Owner.Host : Owner.Guest;
 
   const gates = [
-    { x: 0,  y:  8 },
-    { x: 0,  y: -8 },
-    { x: -8, y:  0 },
-    { x: 8,  y:  0 },
+    { x: 0, y: 8 },
+    { x: 0, y: -8 },
+    { x: -8, y: 0 },
+    { x: 8, y: 0 },
   ];
 
   let hasOwnInGate = false;
@@ -701,7 +991,6 @@ async function handleBonusAccent(
 ): Promise<void> {
   const myOwner = side === "host" ? Owner.Host : Owner.Guest;
 
-  // --- choose accent type ---
   const ACCENT_CHOICES = ["Rock", "Wheel", "Boat", "Knotweed"] as const;
   let chosenType: (typeof ACCENT_CHOICES)[number] | null = null;
 
@@ -712,7 +1001,7 @@ async function handleBonusAccent(
       .trim()
       .toLowerCase();
 
-    const match = ACCENT_CHOICES.find(t => t.toLowerCase() === ans);
+    const match = ACCENT_CHOICES.find((t) => t.toLowerCase() === ans);
     if (!match) {
       console.log("Please choose one of:", ACCENT_CHOICES.join(", "));
       continue;
@@ -720,7 +1009,7 @@ async function handleBonusAccent(
     chosenType = match;
   }
 
-  // ====== NON-Boat accents (Rock / Wheel / Knotweed) ======
+  // Non-Boat accents (Rock/Wheel/Knotweed)
   if (chosenType !== "Boat") {
     while (true) {
       const raw = (await ask("Accent position x,y > ")).trim();
@@ -729,7 +1018,8 @@ async function handleBonusAccent(
       let x: number, y: number;
       try {
         const xy = xyFromString(raw);
-        x = xy.x; y = xy.y;
+        x = xy.x;
+        y = xy.y;
       } catch {
         console.log("Bad coord. Use x,y.");
         continue;
@@ -740,31 +1030,30 @@ async function handleBonusAccent(
         console.log("That coord is off-board.");
         continue;
       }
-      const idx1 = i0 + 1;
+      const idx1Val = i0 + 1;
 
-      if (b.getAtIndex(idx1)) {
+      if (b.getAtIndex(idx1Val)) {
         console.log("Illegal accent: intersection already occupied.");
         continue;
       }
 
-      // Trial board
       const trial = b.clone();
       const tId = toTypeId(chosenType);
-      trial.setAtIndex(idx1, packPiece(tId, myOwner));
+      trial.setAtIndex(idx1Val, packPiece(tId, myOwner));
 
-      // Special case: Wheel should immediately rotate the ring.
       if (chosenType === "Wheel") {
         try {
-          applyWheel(trial, side, idx1);
+          applyWheel(trial, side, idx1Val);
         } catch (e: any) {
           console.log(
-            `Illegal wheel: ${e?.message ?? "cannot rotate from that position."}`
+            `Illegal wheel: ${
+              e?.message ?? "cannot rotate from that position."
+            }`
           );
           continue;
         }
       }
 
-      // Global legality checks AFTER accent (and wheel rotation if any)
       if (detectAnyClash(trial)) {
         console.log("Illegal accent: creates a clash.");
         continue;
@@ -774,21 +1063,27 @@ async function handleBonusAccent(
         continue;
       }
 
-      // Commit
       copyBoard(b, trial);
       if (chosenType === "Wheel") {
         console.log("Wheel placed and neighbors rotated.");
       } else {
         console.log("Accent placed.");
-        checkForGameEnd(b);
-        return;
       }
       console.log(boardWithSidebar(b));
+
+      const end = checkGameEnd(b);
+      if (end.over && !gameEnded) {
+        gameEnded = true;
+        gameResultHost = end.resultHost;
+        console.log(`\n${end.reason}`);
+        runLearningFromGame();
+      }
+
       return;
     }
   }
 
-  // ====== Boat accent (can hit flower OR accent) ======
+  // Boat accent (Boat)
   while (true) {
     const raw = (await ask("Boat target x,y (enemy flower or accent) > ")).trim();
     if (!raw) continue;
@@ -796,7 +1091,8 @@ async function handleBonusAccent(
     let x: number, y: number;
     try {
       const xy = xyFromString(raw);
-      x = xy.x; y = xy.y;
+      x = xy.x;
+      y = xy.y;
     } catch {
       console.log("Bad coord. Use x,y.");
       continue;
@@ -807,8 +1103,8 @@ async function handleBonusAccent(
       console.log("That coord is off-board.");
       continue;
     }
-    const idx1 = i0 + 1;
-    const packed = b.getAtIndex(idx1);
+    const idx1Val = i0 + 1;
+    const packed = b.getAtIndex(idx1Val);
     if (!packed) {
       console.log("Boat must target an existing piece (flower or accent).");
       continue;
@@ -824,25 +1120,29 @@ async function handleBonusAccent(
       t === TypeId.Knotweed;
 
     const isFlower =
-      t === TypeId.R3 || t === TypeId.R4 || t === TypeId.R5 ||
-      t === TypeId.W3 || t === TypeId.W4 || t === TypeId.W5 ||
-      t === TypeId.Lotus || t === TypeId.Orchid;
+      t === TypeId.R3 ||
+      t === TypeId.R4 ||
+      t === TypeId.R5 ||
+      t === TypeId.W3 ||
+      t === TypeId.W4 ||
+      t === TypeId.W5 ||
+      t === TypeId.Lotus ||
+      t === TypeId.Orchid;
 
     if (!isAccent && !isFlower) {
       console.log("Boat can only target a flower or an accent.");
       continue;
     }
 
-    const srcXY = coordsOf(idx1 - 1);
+    const srcXY = coordsOf(idx1Val - 1);
     if (!srcXY) {
       console.log("Internal error: bad coords for source.");
       continue;
     }
 
-    // --- Case 1: Boat on ACCENT → remove that accent, boat consumed ---
     if (isAccent) {
       const trial = b.clone();
-      trial.setAtIndex(idx1, 0); // remove accent; boat is "used" and not left anywhere
+      trial.setAtIndex(idx1Val, 0);
 
       if (detectAnyClash(trial) || boardViolatesGarden(trial)) {
         console.log("Illegal accent: result would be a clash or wrong garden.");
@@ -852,23 +1152,31 @@ async function handleBonusAccent(
       copyBoard(b, trial);
       console.log("Boat removed the accent.");
       console.log(boardWithSidebar(b));
-      checkForGameEnd(b);
+
+      const end = checkGameEnd(b);
+      if (end.over && !gameEnded) {
+        gameEnded = true;
+        gameResultHost = end.resultHost;
+        console.log(`\n${end.reason}`);
+        runLearningFromGame();
+      }
+
       return;
     }
 
-    // --- Case 2: Boat on FLOWER → move flower to one of 8 surrounding spaces ---
+    // Boat on flower → move flower to one of 8 surrounding spaces
     const { x: sx, y: sy } = srcXY;
 
     const neighbors = [
       { x: sx - 1, y: sy + 1 },
-      { x: sx,     y: sy + 1 },
+      { x: sx, y: sy + 1 },
       { x: sx + 1, y: sy + 1 },
-      { x: sx + 1, y: sy     },
+      { x: sx + 1, y: sy },
       { x: sx + 1, y: sy - 1 },
-      { x: sx,     y: sy - 1 },
+      { x: sx, y: sy - 1 },
       { x: sx - 1, y: sy - 1 },
-      { x: sx - 1, y: sy     },
-    ].filter(p => indexOf(p.x, p.y) !== -1); // on-board only
+      { x: sx - 1, y: sy },
+    ].filter((p) => indexOf(p.x, p.y) !== -1);
 
     if (neighbors.length === 0) {
       console.log("No valid adjacent squares to move the flower to.");
@@ -887,13 +1195,14 @@ async function handleBonusAccent(
       let dx: number, dy: number;
       try {
         const dxy = xyFromString(destRaw);
-        dx = dxy.x; dy = dxy.y;
+        dx = dxy.x;
+        dy = dxy.y;
       } catch {
         console.log("Bad coord. Use x,y.");
         continue;
       }
 
-      const destOk = neighbors.find(n => n.x === dx && n.y === dy);
+      const destOk = neighbors.find((n) => n.x === dx && n.y === dy);
       if (!destOk) {
         console.log("Destination must be one of the surrounding 8 spaces.");
         continue;
@@ -913,12 +1222,9 @@ async function handleBonusAccent(
 
       const trial = b.clone();
 
-      // Remove flower from source
-      trial.setAtIndex(idx1, 0);
-      // Place flower at destination
+      trial.setAtIndex(idx1Val, 0);
       trial.setAtIndex(destIdx1, packed);
-      // Leave inert boat on original flower square
-      trial.setAtIndex(idx1, packPiece(TypeId.Boat, myOwner));
+      trial.setAtIndex(idx1Val, packPiece(TypeId.Boat, myOwner));
 
       if (detectAnyClash(trial)) {
         console.log("Illegal accent: creates a clash. Try another destination.");
@@ -934,14 +1240,20 @@ async function handleBonusAccent(
       copyBoard(b, trial);
       console.log("Boat moved the flower.");
       console.log(boardWithSidebar(b));
-      checkForGameEnd(b);
+
+      const end = checkGameEnd(b);
+      if (end.over && !gameEnded) {
+        gameEnded = true;
+        gameResultHost = end.resultHost;
+        console.log(`\n${end.reason}`);
+        runLearningFromGame();
+      }
       return;
     }
   }
 }
 
-
-// Bonus: plant a flower into ANY empty gate
+// Bonus plant (flowers + special flowers)
 async function handleBonusPlant(
   b: Board,
   side: Side,
@@ -950,15 +1262,26 @@ async function handleBonusPlant(
   const myOwner = side === "host" ? Owner.Host : Owner.Guest;
 
   if (!playerCanPlant(b, side)) {
-    console.log("You cannot plant: you already have a tile in a gate or there is no empty gate.");
+    console.log(
+      "You cannot plant: you already have a tile in a gate or there is no empty gate."
+    );
     return;
   }
 
   const rem = remainingFromBoard(b);
   const pool = side === "host" ? rem.host : rem.guest;
 
-  const FLOWERS = ["R3","R4","R5","W3","W4","W5","Lotus","Orchid"] as const;
-  const available = FLOWERS.filter(k => (pool[k] ?? 0) > 0);
+  const FLOWERS = [
+    "R3",
+    "R4",
+    "R5",
+    "W3",
+    "W4",
+    "W5",
+    "Lotus",
+    "Orchid",
+  ] as const;
+  const available = FLOWERS.filter((k) => (pool[k] ?? 0) > 0);
 
   if (available.length === 0) {
     console.log("No flowers remaining to plant.");
@@ -973,16 +1296,13 @@ async function handleBonusPlant(
     if (!raw) continue;
 
     const upper = raw.toUpperCase();
-
-    // Find a matching key case-insensitively
-    const match = available.find(k => k.toUpperCase() === upper);
+    const match = available.find((k) => k.toUpperCase() === upper);
     if (!match) {
       console.log("Please choose one of:", available.join(", "));
       continue;
     }
 
     try {
-      // Convert the canonical name (e.g. "Orchid") to TypeId
       chosenType = toTypeId(match);
     } catch {
       console.log("Unknown type, try again.");
@@ -990,12 +1310,14 @@ async function handleBonusPlant(
   }
 
   const ALL_GATES = [
-    { label: "A", x:  0, y:  8 },
-    { label: "B", x:  0, y: -8 },
-    { label: "C", x: -8, y:  0 },
-    { label: "D", x:  8, y:  0 },
+    { label: "A", x: 0, y: 8 },
+    { label: "B", x: 0, y: -8 },
+    { label: "C", x: -8, y: 0 },
+    { label: "D", x: 8, y: 0 },
   ];
-  const emptyGates = ALL_GATES.filter(g => !b.getAtIndex(idx1(g.x, g.y)));
+  const emptyGates = ALL_GATES.filter(
+    (g) => !b.getAtIndex(idx1(g.x, g.y))
+  );
 
   if (emptyGates.length === 0) {
     console.log("No empty gates to plant into.");
@@ -1014,7 +1336,7 @@ async function handleBonusPlant(
 
     const up = raw.toUpperCase();
 
-    const byLabel = emptyGates.find(g => g.label === up);
+    const byLabel = emptyGates.find((g) => g.label === up);
     if (byLabel) {
       targetGate = { x: byLabel.x, y: byLabel.y };
       break;
@@ -1022,7 +1344,7 @@ async function handleBonusPlant(
 
     try {
       const { x, y } = xyFromString(raw);
-      const byCoord = emptyGates.find(g => g.x === x && g.y === y);
+      const byCoord = emptyGates.find((g) => g.x === x && g.y === y);
       if (byCoord) {
         targetGate = { x: byCoord.x, y: byCoord.y };
         break;
@@ -1036,10 +1358,17 @@ async function handleBonusPlant(
   const idx = idx1(targetGate!.x, targetGate!.y);
   b.setAtIndex(idx, packPiece(chosenType!, myOwner));
   console.log("Bonus plant applied.");
+  console.log(boardWithSidebar(b));
+
+  const end = checkGameEnd(b);
+  if (end.over && !gameEnded) {
+    gameEnded = true;
+    gameResultHost = end.resultHost;
+    console.log(`\n${end.reason}`);
+    runLearningFromGame();
+  }
 }
 
-
-// Decide what to do with a harmony bonus
 async function handleHarmonyBonus(
   b: Board,
   side: Side,
@@ -1048,7 +1377,9 @@ async function handleHarmonyBonus(
   console.log("Harmony bonus! A new harmony was created.");
 
   while (true) {
-    const ans = (await ask("Bonus? (accent / plant / skip) > ")).trim().toLowerCase();
+    const ans = (await ask("Bonus? (accent / plant / skip) > "))
+      .trim()
+      .toLowerCase();
 
     if (ans === "skip") {
       console.log("Bonus skipped.");
@@ -1062,7 +1393,9 @@ async function handleHarmonyBonus(
 
     if (ans === "plant") {
       if (!playerCanPlant(b, side)) {
-        console.log("You cannot plant: you already have a tile in a gate or there is no empty gate.");
+        console.log(
+          "You cannot plant: you already have a tile in a gate or there is no empty gate."
+        );
         continue;
       }
       await handleBonusPlant(b, side, ask);
@@ -1073,16 +1406,63 @@ async function handleHarmonyBonus(
   }
 }
 
+// ---------- Helper conversions ----------
+function toTypeId(name: string): TypeId {
+  const normalized = name.trim().toUpperCase();
+  switch (normalized) {
+    case "R3":
+      return TypeId.R3;
+    case "R4":
+      return TypeId.R4;
+    case "R5":
+      return TypeId.R5;
+    case "W3":
+      return TypeId.W3;
+    case "W4":
+      return TypeId.W4;
+    case "W5":
+      return TypeId.W5;
+    case "LOTUS":
+      return TypeId.Lotus;
+    case "ORCHID":
+      return TypeId.Orchid;
+    case "ROCK":
+      return TypeId.Rock;
+    case "WHEEL":
+      return TypeId.Wheel;
+    case "BOAT":
+      return TypeId.Boat;
+    case "KNOTWEED":
+      return TypeId.Knotweed;
+    default:
+      throw new Error(`Unknown piece type: ${name}`);
+  }
+}
+
+function toOwner(name: string): Owner {
+  const n = name.trim().toLowerCase();
+  if (n === "host" || n === "h") return Owner.Host;
+  if (n === "guest" || n === "g") return Owner.Guest;
+  throw new Error(`Unknown owner: ${name}`);
+}
+
+// ---------- Global board (used by learning) ----------
+const globalBoard = new Board();
+
 // ---------- Main loop ----------
 async function main() {
-  const b = new Board(); // EMPTY START
+  const b = globalBoard;
   let toMove: Side = FIRST;
 
-  console.log(`You are ${HUMAN}. ${FIRST} moves first. Depth=${DEPTH}${TIMEMS ? ` Time=${TIMEMS}ms` : ""}`);
+  console.log(
+    `You are ${HUMAN}. ${FIRST} moves first. Depth=${DEPTH}${
+      TIMEMS ? ` Time=${TIMEMS}ms` : ""
+    }`
+  );
   console.log(boardWithSidebar(b));
   help();
 
-  // If engine is first and board is empty, let it plant the opening
+  // Engine opening if it moves first on empty board
   if (toMove !== HUMAN && isEmptyBoard(b)) {
     const t = enginePickOpeningType(b, toMove);
     if (t) {
@@ -1090,43 +1470,50 @@ async function main() {
       plantOpening(b, toMove, t);
     }
     console.log(boardWithSidebar(b));
-    if (toMove !== "guest") toMove = "guest"; // guest has second move
+    if (toMove !== "guest") toMove = "guest";
   }
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  const ask = (q: string) => new Promise<string>(res => rl.question(q, res));
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true,
+  });
+  const ask = (q: string) =>
+    new Promise<string>((res) => rl.question(q, res));
 
   while (true) {
-    const line = (await ask(`${toMove === HUMAN ? "Your" : "Engine's"} turn [${toMove}] > `)).trim();
+    const line = (
+      await ask(`${toMove === HUMAN ? "Your" : "Engine's"} turn [${toMove}] > `)
+    ).trim();
     if (!line) continue;
 
     const lower = line.toLowerCase();
     if (lower === "quit") break;
-    if (lower === "help") { help(); continue; }
-    if (lower === "print") { console.log(boardWithSidebar(b)); continue; }
-    if (lower === "score") {
-      // 1) First, check ring-based endings
-      const ringOutcome = checkRings(b);
-      if (ringOutcome === "host") {
-        console.log("Host wins by creating a harmony ring.");
-      } else if (ringOutcome === "guest") {
-        console.log("Guest wins by creating a harmony ring.");
-      } else if (ringOutcome === "both") {
-        console.log("Game drawn by creating two harmony rings at once.");
-      } else {
-        // 2) No ring: fall back to cross-midline harmony count
-        const { host, guest } = countCrossMidlineHarmonies(b);
-        if (host > guest) {
-          console.log("Host wins by having more harmonies across the midline.");
-        } else if (guest > host) {
-          console.log("Guest wins by having more harmonies across the midline.");
-        } else {
-          console.log("Game drawn by having the same number of harmonies across the midline.");
-        }
-      }
+    if (lower === "help") {
+      help();
+      continue;
+    }
+    if (lower === "print") {
+      console.log(boardWithSidebar(b));
+      continue;
+    }
+    if (lower === "learn") {
+      runLearningFromGame();
       continue;
     }
 
+    if (lower === "score") {
+      const end = checkGameEnd(b);
+      if (end.over) {
+        console.log(end.reason);
+      } else {
+        const evalHost = evaluate(b, "host");
+        console.log(
+          `No clear ring/alt-win yet. Eval(host POV) = ${evalHost.toFixed(2)}`
+        );
+      }
+      continue;
+    }
 
     // Undo
     if (lower === "undo") {
@@ -1142,17 +1529,20 @@ async function main() {
     }
 
     try {
-      // Opening: plant by hand
+      // Opening plant by hand
       if (lower.startsWith("plant ")) {
         const typ = toTypeId(line.slice(6).trim());
 
-        // Lotus and Orchid may ONLY be planted as harmony bonuses.
+        // Lotus / Orchid only via harmony bonuses
         if (typ === TypeId.Lotus || typ === TypeId.Orchid) {
-          console.log("Lotus and Orchid may only be planted as a harmony bonus.");
+          console.log(
+            "Lotus and Orchid may only be planted as a harmony bonus."
+          );
           continue;
         }
 
-        const g = gateFor(toMove), m = mirrorGateFor(toMove);
+        const g = gateFor(toMove),
+          m = mirrorGateFor(toMove);
         const gateOccupied =
           b.getAtIndex(idx1(g.x, g.y)) ||
           b.getAtIndex(idx1(m.x, m.y));
@@ -1163,21 +1553,19 @@ async function main() {
           pushHistory(b, toMove);
           plantOpening(b, toMove, typ);
           console.log(boardWithSidebar(b));
-          if (toMove === "host") toMove = "guest"; // guest gets the extra move
+          if (toMove === "host") toMove = "guest"; // guest gets extra move
         }
         continue;
       }
 
       if (lower === "rings") {
-  const rings = getRingOwners(b);
-  console.log("Ring owners:", rings);
+        const rings = getRingOwners(b);
+        console.log("Ring owners:", rings);
+        // You can add raw ring printing here if findHarmonyRings is exported
+        continue;
+      }
 
-  const cycles = findHarmonyRings(b); // if you export it from move.ts
-  console.log("Raw cycles:", cycles.map(c => c.map(i => coordsOf(i - 1))));
-  continue;
-}
-
-      // Engine (plant if opening, else search)
+      // Engine move
       const engMatch = lower.match(/^engine(?:\s+(host|guest|me|other))?$/);
       if (engMatch) {
         const want = engMatch[1];
@@ -1205,13 +1593,19 @@ async function main() {
             plantOpening(b, toMove, t);
             const t1 = performance.now();
             const g = gateFor(toMove);
-            console.log(`Engine → PLANT ${TypeId[t]} at gate (${g.x},${g.y}) (mirrored)`);
+            console.log(
+              `Engine → PLANT ${TypeId[t]} at gate (${g.x},${g.y}) (mirrored)`
+            );
             if (toMove === "host") toMove = "guest";
             console.log(`search: ${((t1 - t0) / 1000).toFixed(3)}s`);
             console.log(boardWithSidebar(b));
             continue;
           }
         }
+
+        // Record features before move
+        const feats = extractFeatures(b);
+        gamePositionFeatures.push(feats);
 
         pushHistory(b, toMove);
         const mv = pickBestMove(
@@ -1224,7 +1618,7 @@ async function main() {
 
         if (!mv) {
           console.log("Engine: no move.");
-          history.pop(); // no change
+          history.pop();
         } else {
           printMove(mv);
           try {
@@ -1233,40 +1627,47 @@ async function main() {
             toMove = other(toMove);
           } catch (e: any) {
             console.log(`Apply failed: ${e?.message ?? e}. Skipping.`);
-            history.pop(); // rollback
+            history.pop();
           }
         }
         console.log(`search: ${((t1 - t0) / 1000).toFixed(3)}s`);
         console.log(boardWithSidebar(b));
+
+        const end = checkGameEnd(b);
+        if (end.over && !gameEnded) {
+          gameEnded = true;
+          gameResultHost = end.resultHost;
+          console.log(`\n${end.reason}`);
+          runLearningFromGame();
+        }
         continue;
       }
 
-        // Arrange:
-      // - If you give multiple waypoints, we use them literally.
-      // - If you give a single destination, we auto-build a Manhattan path.
-      //   We try H-then-V, and if that hits a block, we try V-then-H.
+      // Arrange
       if (lower.startsWith("arr ")) {
         const m = line.slice(4).split("->");
-        if (m.length !== 2) throw new Error("Use: arr x,y -> a,b; c,d; ...");
+        if (m.length !== 2)
+          throw new Error("Use: arr x,y -> a,b; c,d; ...");
 
         const fromCoord = xyFromString(m[0].trim());
         const fromIdx = idx1(fromCoord.x, fromCoord.y);
 
         const rhs = m[1].trim();
-        const parts = rhs.split(";").map(p => p.trim()).filter(Boolean);
+        const parts = rhs
+          .split(";")
+          .map((p) => p.trim())
+          .filter(Boolean);
         if (parts.length === 0) throw new Error("Empty path");
 
-        // Capture harmony edges BEFORE move (for this side),
-        // so we can see which partners the moving piece already had.
+        // Harmony edges BEFORE move for this side
         const beforeEdgesAll = (listHarmonyEdges(b) as HarmonyEdgeLite[]).filter(
-          e => e.owner === toMove
+          (e) => e.owner === toMove
         );
 
         let pathIdx: number[] | null = null;
         let lastReason: string | undefined;
 
         if (parts.length === 1) {
-          // --- single-destination QoL ---
           const dest = xyFromString(parts[0]);
 
           const tryOrder = (horizontalFirst: boolean) => {
@@ -1296,18 +1697,16 @@ async function main() {
               }
             }
 
-            const idxPath = coordPath.map(c => idx1(c.x, c.y));
+            const idxPath = coordPath.map((c) => idx1(c.x, c.y));
             const res = validateArrange(b, fromIdx, idxPath);
             return { res, idxPath };
           };
 
-          // Try horizontal-then-vertical first
           let attempt = tryOrder(true);
           if (attempt.res.ok) {
             pathIdx = attempt.idxPath;
           } else {
             lastReason = attempt.res.reason;
-            // If blocked somewhere, try vertical-then-horizontal
             const attempt2 = tryOrder(false);
             if (attempt2.res.ok) {
               pathIdx = attempt2.idxPath;
@@ -1317,12 +1716,13 @@ async function main() {
           }
 
           if (!pathIdx) {
-            console.log(`Illegal arrange: ${lastReason ?? "invalid path"}`);
+            console.log(
+              `Illegal arrange: ${lastReason ?? "invalid path"}`
+            );
             continue;
           }
         } else {
-          // --- literal multi-waypoint path ---
-          const coords = parts.map(p => xyFromString(p));
+          const coords = parts.map((p) => xyFromString(p));
           pathIdx = coords.map(({ x, y }) => idx1(x, y));
           const res = validateArrange(b, fromIdx, pathIdx);
           if (!res.ok) {
@@ -1331,10 +1731,10 @@ async function main() {
           }
         }
 
-        // --- garden color legality: only final landing matters ---
+        // Garden legality for final landing
         const lastIdx = pathIdx[pathIdx.length - 1];
-        const lastXY  = coordsOf(lastIdx - 1);
-        const garden  = getGardenType(lastXY.x, lastXY.y); // "red" | "white" | "neutral"
+        const lastXY = coordsOf(lastIdx - 1);
+        const garden = getGardenType(lastXY.x, lastXY.y);
 
         const pieceVal = b.getAtIndex(fromIdx);
         if (!pieceVal) {
@@ -1344,70 +1744,88 @@ async function main() {
         const piece = unpackPiece(pieceVal)!;
 
         if (isWhiteFlower(piece.type) && garden === "red") {
-          console.log("Illegal arrange: white flowers cannot land in the red garden.");
+          console.log(
+            "Illegal arrange: white flowers cannot land in the red garden."
+          );
           continue;
         }
         if (isRedFlower(piece.type) && garden === "white") {
-          console.log("Illegal arrange: red flowers cannot land in the white garden.");
+          console.log(
+            "Illegal arrange: red flowers cannot land in the white garden."
+          );
           continue;
         }
 
-        // --- actually apply move ---
+        // Record features before *your* move too
+        const feats = extractFeatures(b);
+        gamePositionFeatures.push(feats);
+
         pushHistory(b, toMove);
         const mv = { kind: "arrange", from: fromIdx, path: pathIdx };
         const nb = applyAnyMove(b, toMove, mv);
         copyBoard(b, nb);
-      // --- harmony bonus detection (only for the moving side) ---
-      
-      // BEFORE the move, we recorded:
-      const beforeCount = beforeEdgesAll.length;
-      
-      // AFTER the move:
-      const afterEdges = (listHarmonyEdges(b) as HarmonyEdgeLite[]).filter(
-        e => e.owner === toMove
-      );
-      const afterCount = afterEdges.length;
-      
-      // You get a bonus ONLY if your total harmony count increased
-      const newHarmony = afterCount > beforeCount;
-      
-      if (newHarmony && toMove === HUMAN) {
-        await handleHarmonyBonus(b, toMove, ask);
-      }
-      
-      toMove = other(toMove);
-      console.log(boardWithSidebar(b));
-      continue;
-      }
 
+        // Harmony bonus detection
+        const beforeCount = beforeEdgesAll.length;
+        const afterEdges = (listHarmonyEdges(b) as HarmonyEdgeLite[]).filter(
+          (e) => e.owner === toMove
+        );
+        const afterCount = afterEdges.length;
+        const newHarmony = afterCount > beforeCount;
+
+        if (newHarmony && toMove === HUMAN) {
+          await handleHarmonyBonus(b, toMove, ask);
+        }
+
+        toMove = other(toMove);
+        console.log(boardWithSidebar(b));
+
+        const end = checkGameEnd(b);
+        if (end.over && !gameEnded) {
+          gameEnded = true;
+          gameResultHost = end.resultHost;
+          console.log(`\n${end.reason}`);
+          runLearningFromGame();
+        }
+        continue;
+      }
 
       // Wheel
       if (lower.startsWith("wheel ")) {
         const cxy = xyFromString(line.slice(6).trim());
+        const feats = extractFeatures(b);
+        gamePositionFeatures.push(feats);
+
         pushHistory(b, toMove);
         const mv = { kind: "wheel", center: idx1(cxy.x, cxy.y) };
         const nb = applyAnyMove(b, toMove, mv);
         copyBoard(b, nb);
         toMove = other(toMove);
         console.log(boardWithSidebar(b));
+
+        const end = checkGameEnd(b);
+        if (end.over && !gameEnded) {
+          gameEnded = true;
+          gameResultHost = end.resultHost;
+          console.log(`\n${end.reason}`);
+          runLearningFromGame();
+        }
         continue;
       }
 
-         // Boat on flower
+      // Boat on flower
       if (lower.startsWith("boatf ")) {
         const body = line.slice(6).trim();
-        // New syntax: boatf boatX,boatY fromX,fromY   (we'll prompt for destination)
-        const parts = body.split(/\s+/).map(s => s.trim()).filter(Boolean);
+        const parts = body.split(/\s+/).map((s) => s.trim()).filter(Boolean);
         if (parts.length !== 2) {
           throw new Error("Use: boatf boatX,boatY fromX,fromY");
         }
 
         const boatCoord = xyFromString(parts[0]);
         const fromCoord = xyFromString(parts[1]);
-        const boatIdx   = idx1(boatCoord.x, boatCoord.y);
-        const fromIdx   = idx1(fromCoord.x, fromCoord.y);
+        const boatIdx = idx1(boatCoord.x, boatCoord.y);
+        const fromIdx = idx1(fromCoord.x, fromCoord.y);
 
-        // --- Check boat piece ---
         const boatVal = b.getAtIndex(boatIdx);
         if (!boatVal) {
           console.log("Illegal boat: no boat at that coordinate.");
@@ -1419,7 +1837,6 @@ async function main() {
           continue;
         }
 
-        // --- Check flower piece ---
         const flowerVal = b.getAtIndex(fromIdx);
         if (!flowerVal) {
           console.log("Illegal boat: no flower at fromX,fromY.");
@@ -1427,42 +1844,56 @@ async function main() {
         }
         const flower = unpackPiece(flowerVal)!;
         const isFlower =
-          flower.type === TypeId.R3 || flower.type === TypeId.R4 || flower.type === TypeId.R5 ||
-          flower.type === TypeId.W3 || flower.type === TypeId.W4 || flower.type === TypeId.W5 ||
-          flower.type === TypeId.Lotus || flower.type === TypeId.Orchid;
+          flower.type === TypeId.R3 ||
+          flower.type === TypeId.R4 ||
+          flower.type === TypeId.R5 ||
+          flower.type === TypeId.W3 ||
+          flower.type === TypeId.W4 ||
+          flower.type === TypeId.W5 ||
+          flower.type === TypeId.Lotus ||
+          flower.type === TypeId.Orchid;
         if (!isFlower) {
           console.log("Illegal boat: target piece is not a flower.");
           continue;
         }
 
-        // --- Find 8 surrounding legal destinations around the flower ---
-        const basis = coordsOf(fromIdx - 1) as { x: number; y: number } | undefined;
+        const basis = coordsOf(fromIdx - 1) as
+          | { x: number; y: number }
+          | undefined;
         if (!basis) {
           console.log("Illegal boat: source coordinate invalid.");
           continue;
         }
 
         const dirs: [number, number][] = [
-          [-1,  1], [0,  1], [1,  1],  // A, B, C
-          [ 1,  0],                    // D
-          [ 1, -1], [0, -1], [-1, -1], // E, F, G
-          [-1,  0],                    // H
+          [-1, 1],
+          [0, 1],
+          [1, 1],
+          [1, 0],
+          [1, -1],
+          [0, -1],
+          [-1, -1],
+          [-1, 0],
         ];
-        const labels = ["A","B","C","D","E","F","G","H"];
+        const labels = ["A", "B", "C", "D", "E", "F", "G", "H"];
 
-        const neighbors: { label: string; x: number; y: number; idx1: number }[] = [];
+        const neighbors: {
+          label: string;
+          x: number;
+          y: number;
+          idx1: number;
+        }[] = [];
 
         for (let i = 0; i < dirs.length; i++) {
           const [dx, dy] = dirs[i];
           const x = basis.x + dx;
           const y = basis.y + dy;
           const i0 = indexOf(x, y);
-          if (i0 === -1) continue;          // off board
+          if (i0 === -1) continue;
           const idx1Val = i0 + 1;
-          if (b.getAtIndex(idx1Val)) continue; // must be empty
+          if (b.getAtIndex(idx1Val)) continue;
 
-          // Garden-color legality for flowers, same rule as arrange:
-          const g = getGardenType(x, y); // "red" | "white" | "neutral"
+          const g = getGardenType(x, y);
           if (isWhiteFlower(flower.type) && g === "red") continue;
           if (isRedFlower(flower.type) && g === "white") continue;
 
@@ -1470,7 +1901,9 @@ async function main() {
         }
 
         if (neighbors.length === 0) {
-          console.log("Illegal boat: no legal destination adjacent to the flower.");
+          console.log(
+            "Illegal boat: no legal destination adjacent to the flower."
+          );
           continue;
         }
 
@@ -1485,45 +1918,64 @@ async function main() {
           if (!ansRaw) continue;
           const up = ansRaw.toUpperCase();
 
-          // by letter
-          const byLabel = neighbors.find(n => n.label === up);
+          const byLabel = neighbors.find((n) => n.label === up);
           if (byLabel) {
             destIdx = byLabel.idx1;
             break;
           }
 
-          // or by coord
           try {
             const { x, y } = xyFromString(ansRaw);
-            const byCoord = neighbors.find(n => n.x === x && n.y === y);
+            const byCoord = neighbors.find((n) => n.x === x && n.y === y);
             if (!byCoord) {
-              console.log("That coordinate is not a legal destination for this boat move.");
+              console.log(
+                "That coordinate is not a legal destination for this boat move."
+              );
               continue;
             }
             destIdx = byCoord.idx1;
             break;
           } catch {
-            console.log("Please enter a valid letter or x,y coordinate.");
+            console.log(
+              "Please enter a valid letter or x,y coordinate."
+            );
           }
         }
 
-        // Apply the move (with clash & gate checks via applyAnyMove / rules)
+        const feats = extractFeatures(b);
+        gamePositionFeatures.push(feats);
+
         pushHistory(b, toMove);
         const mv = { kind: "boatFlower", boat: boatIdx, from: fromIdx, to: destIdx! };
         const nb = applyAnyMove(b, toMove, mv);
         copyBoard(b, nb);
         toMove = other(toMove);
         console.log(boardWithSidebar(b));
+
+        const end = checkGameEnd(b);
+        if (end.over && !gameEnded) {
+          gameEnded = true;
+          gameResultHost = end.resultHost;
+          console.log(`\n${end.reason}`);
+          runLearningFromGame();
+        }
         continue;
       }
 
-      // Boat on accent
+      // Boat on accent (direct call to rules)
       if (lower.startsWith("boata ")) {
         const body = line.slice(6).trim();
-        const [bxy, txy] = body.split(/\s+/).map(s => s.trim());
-        if (!bxy || !txy) throw new Error("Use: boata boatX,boatY targetX,targetY");
+        const [bxy, txy] = body
+          .split(/\s+/)
+          .map((s) => s.trim());
+        if (!bxy || !txy)
+          throw new Error("Use: boata boatX,boatY targetX,targetY");
         const boat = xyFromString(bxy);
         const targ = xyFromString(txy);
+
+        const feats = extractFeatures(b);
+        gamePositionFeatures.push(feats);
+
         const mv = {
           kind: "boatAccent",
           boat: idx1(boat.x, boat.y),
@@ -1534,20 +1986,28 @@ async function main() {
         copyBoard(b, nb);
         toMove = other(toMove);
         console.log(boardWithSidebar(b));
+
+        const end = checkGameEnd(b);
+        if (end.over && !gameEnded) {
+          gameEnded = true;
+          gameResultHost = end.resultHost;
+          console.log(`\n${end.reason}`);
+          runLearningFromGame();
+        }
         continue;
       }
 
-      // Force place (debug, but still respect per-side pools)
+      // Force place (debug)
       if (lower.startsWith("place ")) {
         const parts = line.trim().split(/\s+/);
         if (parts.length < 4 || parts.length > 5) {
           throw new Error("Use: place TYPE OWNER x,y [next]");
         }
 
-        const type  = toTypeId(parts[1]);
+        const type = toTypeId(parts[1]);
         const owner = toOwner(parts[2]);
         const { x, y } = xyFromString(parts[3]);
-        const advance = (parts[4]?.toLowerCase() === "next");
+        const advance = parts[4]?.toLowerCase() === "next";
 
         const targetIdx = idx1(x, y);
         if (b.getAtIndex(targetIdx)) {
@@ -1555,15 +2015,17 @@ async function main() {
           continue;
         }
 
-        const rem  = remainingFromBoard(b);
+        const rem = remainingFromBoard(b);
         const pool = owner === Owner.Host ? rem.host : rem.guest;
-        const key  = keyForType(type);
+        const key = keyForType(type);
 
         if (!key) {
           throw new Error(`Unknown type for pool: ${parts[1]}`);
         }
         if ((pool[key] ?? 0) <= 0) {
-          console.log(`Illegal place: no ${key} tiles remaining for that side.`);
+          console.log(
+            `Illegal place: no ${key} tiles remaining for that side.`
+          );
           continue;
         }
 
@@ -1575,12 +2037,20 @@ async function main() {
         if (advance || ownerSide === toMove) {
           toMove = other(toMove);
         }
+
+        const end = checkGameEnd(b);
+        if (end.over && !gameEnded) {
+          gameEnded = true;
+          gameResultHost = end.resultHost;
+          console.log(`\n${end.reason}`);
+          runLearningFromGame();
+        }
         continue;
       }
 
       console.log("Unknown command. Type 'help'.");
     } catch (e: any) {
-      console.log(`Error: ${e.message ?? e}`);
+      console.log(`Error: ${e?.message ?? e}`);
     }
   }
 
@@ -1588,4 +2058,7 @@ async function main() {
   console.log("Bye!");
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
